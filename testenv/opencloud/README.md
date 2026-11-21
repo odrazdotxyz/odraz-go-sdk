@@ -32,3 +32,21 @@ eval "$(testenv/opencloud/seed.sh)"   # fresh instance + app token; exports ODRA
 | GET on a folder | 200 (not an error) |
 | Missing path | 404 |
 | Unauthenticated | 401 with `WWW-Authenticate: Bearer` |
+
+## OIDC (built-in IdP, "Konnect")
+
+- **Custom client**: `idp.yaml` is mounted into `/etc/opencloud` and registers the SDK's public test client
+  `odraz-test` (native, no secret, redirect `http://127.0.0.1` / `http://localhost`, any port). The `clients`
+  list replaces the generated defaults, so the standard clients are repeated in it. An unregistered
+  `client_id` is refused at login with `unknown client_id`.
+- **Tokens**: access tokens live **300 s**; refresh tokens work with `offline_access` and are rotated, but are
+  stateless, so a rotated-away refresh token keeps working until it expires (other IdPs reject it).
+  Tokens are accepted as `Authorization: Bearer` on `/graph` and `/dav`; a bad token gets 401.
+- **Headless login** (what `vendors/opencloud/oidc_real_test.go` does, read from the sign-in page's scripts):
+  1. `GET authorization_endpoint?...` (redirects to the login page; nothing needed from it)
+  2. `POST /signin/v1/identifier/_/logon` JSON `{"state","params":[user,password,"1"],"hello":{"scope","client_id","redirect_uri","flow":"oidc"}}`
+     with headers `Kopano-Konnect-XSRF: 1`, **`Origin`** and **`Referer`** (without them: 400, "missing origin or referer header")
+  3. if the answer has `hello.next == "consent"` (clients that are not `trusted`): `POST .../_/consent`
+     `{"state","allow":true,"scope":"openid profile offline_access","client_id","redirect_uri","ref":<authorize state>,"flow_nonce":""}`
+  4. `GET /signin/v1/identifier/_/authorize?<original params>&konnect=<state from step 3, or from step 2>`
+     -> `302` to the redirect URI with `code` and `state`

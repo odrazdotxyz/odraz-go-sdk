@@ -13,4 +13,5 @@ services:
       PROXY_ENABLE_APP_AUTH: "true"     # app tokens as Basic auth: what the adapter uses in v1
       OC_ADD_RUN_SERVICES: auth-app
       OC_LOG_LEVEL: warn
+    volumes: ["./idp.yaml:/etc/opencloud/idp.yaml:ro"]   # custom OIDC clients, see idp.yaml
     tmpfs: ["/etc/opencloud:uid=1000,gid=1000", "/var/lib/opencloud:uid=1000,gid=1000"]   # fresh state on every `up`

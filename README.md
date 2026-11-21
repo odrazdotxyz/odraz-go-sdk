@@ -140,9 +140,12 @@ acc := accounts.Account{ID: "home", Adapter: "opencloud",
 - ID tokens are not verified (they come straight from the token endpoint over TLS; the server validates the
   access token on every request).
 
-Tested against a fake OIDC provider (discovery, PKCE, state, code replay, refresh rotation, revocation). It
-is **not yet verified against a real provider**: run `go run ./examples/oidc-login -server <url> -client-id <id>`
-against yours (add `-insecure` for self-signed certificates) and tell us what happens.
+Verified against a fake provider (discovery, PKCE, state, code replay, refresh rotation, revocation) and
+against a **real OpenCloud with its built-in IdP** (`testenv/opencloud`): login with a registered third-party
+client, the token on the Graph API and WebDAV, refresh before expiry, recovery from a rejected token, and the
+refusals (unregistered client, wrong password, code replay). **Not yet verified against Pocket ID or another
+external provider**: run `go run ./examples/oidc-login -server <url> -client-id <id>` against yours (add
+`-insecure` for self-signed certificates) and tell us what happens.
 
 ## Auth proxies
 

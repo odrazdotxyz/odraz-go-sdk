@@ -13,4 +13,6 @@ TOKEN=$(docker compose exec -T opencloud opencloud auth-app create --user-name=a
 [ -n "$TOKEN" ] || { echo "could not create app token" >&2; exit 1; }
 echo "export ODRAZ_TEST_OPENCLOUD_URL=https://localhost:9200"
 echo "export ODRAZ_TEST_OPENCLOUD_USER=admin"
+echo "export ODRAZ_TEST_OPENCLOUD_PASSWORD=admin"
+echo "export ODRAZ_TEST_OPENCLOUD_OIDC_CLIENT=odraz-test   # registered in testenv/opencloud/idp.yaml"
 echo "export ODRAZ_TEST_OPENCLOUD_TOKEN='$TOKEN'"

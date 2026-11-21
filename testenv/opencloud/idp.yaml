@@ -1,0 +1,47 @@
+# Custom OIDC clients for the built-in IdP. The list replaces the generated defaults,
+# so the standard clients are repeated; "odraz-test" is the SDK's public (PKCE, no secret) test client.
+clients:
+  - id: web
+    name: OpenCloud Web App
+    trusted: true
+    secret: ""
+    redirect_uris:
+      - https://localhost:9200/
+      - https://localhost:9200/oidc-callback.html
+      - https://localhost:9200/oidc-silent-redirect.html
+    post_logout_redirect_uris: []
+    origins:
+      - https://localhost:9200
+    application_type: ""
+  - id: OpenCloudDesktop
+    name: OpenCloud Desktop Client
+    trusted: false
+    secret: ""
+    redirect_uris: [http://127.0.0.1, http://localhost]
+    post_logout_redirect_uris: []
+    origins: []
+    application_type: native
+  - id: OpenCloudAndroid
+    name: OpenCloud Android App
+    trusted: false
+    secret: ""
+    redirect_uris: [oc://android.opencloud.eu]
+    post_logout_redirect_uris: [oc://android.opencloud.eu]
+    origins: []
+    application_type: native
+  - id: OpenCloudIOS
+    name: OpenCloud iOS App
+    trusted: false
+    secret: ""
+    redirect_uris: [oc://ios.opencloud.eu]
+    post_logout_redirect_uris: [oc://ios.opencloud.eu]
+    origins: []
+    application_type: native
+  - id: odraz-test
+    name: Odraz SDK test client
+    trusted: false
+    secret: ""
+    redirect_uris: [http://127.0.0.1, http://localhost]
+    post_logout_redirect_uris: []
+    origins: []
+    application_type: native
