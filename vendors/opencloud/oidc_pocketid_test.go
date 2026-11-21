@@ -147,3 +147,68 @@ func TestOpenCloudWithPocketID(t *testing.T) {
 		t.Errorf("rejected token without refresh token: %v", err)
 	}
 }
+
+// Regression: a user that already exists in OpenCloud (here its built-in "admin", with an email) logs in
+// again through Pocket ID using the SDK's DEFAULT scopes. OpenCloud's autoprovisioning compares
+// the token claims with the stored user on every login; without an email claim it tried to blank the email
+// and answered 500 from the second login on. The default scopes must include "email".
+func TestOpenCloudWithPocketIDExistingUser(t *testing.T) {
+	ocURL := os.Getenv("ODRAZ_TEST_OCPOCKET_URL")
+	if ocURL == "" {
+		t.Skip("ODRAZ_TEST_OCPOCKET_URL not set (testenv/opencloud-pocketid)")
+	}
+	pid := idptest.New(t)
+	userID := pid.EnsureUser("admin", "admin@pocketid.test") // same name as OpenCloud's admin: mapped by preferred_username
+	pid.EnsureClient("odraz-existing-user")
+
+	acc := accounts.Account{ID: "oc", Adapter: "opencloud", Config: map[string]string{
+		"url": ocURL, accounts.ConfigInsecure: "true", accounts.ConfigOIDCClientID: "odraz-existing-user"}}
+	for login := 1; login <= 2; login++ {
+		if login > 1 {
+			time.Sleep(15 * time.Second) // let OpenCloud's cached user expire, so the claims are compared again
+		}
+		store := accounts.NewMemoryStore()
+		h0, err := accounts.Open(ctx, acc, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lb, err := oidc.NewLoopback()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sess, err := oidc.Begin(ctx, oidc.HTTPClient(h0.Env), ocURL, oidc.Config{ClientID: "odraz-existing-user", RedirectURI: lb.RedirectURI()}) // default scopes
+		if err != nil {
+			lb.Close()
+			t.Fatal(err)
+		}
+		if err := pid.Authorize(pid.Browser(userID), sess.AuthorizationURL); err != nil {
+			lb.Close()
+			t.Fatalf("login %d: browser flow: %v", login, err)
+		}
+		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		callback, err := lb.Wait(wctx)
+		cancel()
+		lb.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens, err := sess.Complete(ctx, callback)
+		if err != nil {
+			t.Fatalf("login %d: %v", login, err)
+		}
+		if err := oidc.Save(ctx, store, "oc", tokens); err != nil {
+			t.Fatal(err)
+		}
+		h, err := accounts.Open(ctx, acc, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl, err := files.ForAccount(ctx, h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cl.Drives(ctx); err != nil {
+			t.Fatalf("login %d: OpenCloud failed for an existing user (scopes %v): %v", login, sess.AuthorizationURL, err)
+		}
+	}
+}

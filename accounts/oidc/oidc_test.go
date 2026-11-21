@@ -78,7 +78,7 @@ func TestLoginFlow(t *testing.T) {
 	u, _ := url.Parse(sess.AuthorizationURL)
 	q := u.Query()
 	if q.Get("code_challenge_method") != "S256" || q.Get("response_type") != "code" || q.Get("state") == "" ||
-		q.Get("scope") != "openid profile offline_access" || q.Get("client_id") != f.ClientID || q.Get("code_challenge") == "" {
+		q.Get("scope") != "openid profile email offline_access" || q.Get("client_id") != f.ClientID || q.Get("code_challenge") == "" {
 		t.Fatalf("authorization URL = %s", sess.AuthorizationURL)
 	}
 	if strings.Contains(sess.AuthorizationURL, sess.Verifier) {

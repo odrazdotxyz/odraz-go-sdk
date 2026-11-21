@@ -126,8 +126,9 @@ acc := accounts.Account{ID: "home", Adapter: "opencloud",
 - **The SDK never opens a browser**; the app does. `sess.Marshal()` / `oidc.Resume` keep a login alive if the
   app is suspended while the user is in the browser. `oidc.NewLoopback()` receives the redirect on
   `127.0.0.1` for desktop apps.
-- **Default scopes** are the minimum: `openid profile offline_access` (`profile` carries the username the
-  server maps users by, `offline_access` gives a refresh token).
+- **Default scopes** are the minimum: `openid profile email offline_access` (`profile` carries the username the
+  server maps users by, `email` is needed because OpenCloud re-compares the token's claims with the stored user
+  and fails for existing users when the email claim is missing, `offline_access` gives a refresh token).
 - **Refresh**: tokens are refreshed shortly before they expire, and once more if the server answers 401
   (for example a revoked token), then the request is retried once. Requests with a streaming body (uploads)
   are not replayed: that attempt fails with `ErrAuth`, the next one uses the fresh token. Concurrent requests

@@ -36,9 +36,14 @@ import (
 	"github.com/odrazdotxyz/odraz-go-sdk/accounts"
 )
 
-// DefaultScopes are the smallest scopes that work with OpenCloud: openid, the
-// profile claims it maps users by (preferred_username), and a refresh token.
-var DefaultScopes = []string{"openid", "profile", "offline_access"}
+// DefaultScopes are the smallest scopes that work with OpenCloud: openid, the profile
+// claims it maps users by (preferred_username), email, and a refresh token.
+//
+// "email" is not optional: OpenCloud compares the token's claims with the stored user on
+// login (after its short-lived user cache expires) and, with no email claim, tries to blank
+// the email of an existing user and fails with HTTP 500 from the second login on. OpenCloud's
+// own clients request "openid profile email" as well.
+var DefaultScopes = []string{"openid", "profile", "email", "offline_access"}
 
 // Config identifies the app to the provider. Both values must be registered
 // with the provider by its admin (once per server).

@@ -84,6 +84,40 @@ func (p *PocketID) Setup() Fixture {
 }
 
 // browser is a logged-in browser session (via one-time access token).
+// EnsureUser returns the ID of the user with this username, creating it (with an email) if needed.
+// Unlike Setup it leaves the user in place, for tests about users that already exist elsewhere.
+func (p *PocketID) EnsureUser(username, email string) string {
+	var list struct {
+		Data []struct{ ID, Username string } `json:"data"`
+	}
+	p.Admin("GET", "/api/users?search="+url.QueryEscape(username), nil, &list)
+	for _, u := range list.Data {
+		if u.Username == username {
+			return u.ID
+		}
+	}
+	var u struct{ ID string }
+	p.Admin("POST", "/api/users", map[string]any{"username": username, "email": email, "emailVerified": true,
+		"firstName": "Existing", "lastName": "User", "displayName": "Existing User"}, &u)
+	return u.ID
+}
+
+// EnsureClient creates the loopback PKCE test client with this ID if it does not exist yet.
+func (p *PocketID) EnsureClient(id string) {
+	body := map[string]any{"id": id, "name": "Odraz SDK test",
+		"callbackURLs": []string{"http://127.0.0.1/callback", "http://localhost/callback"}, "isPublic": true, "pkceEnabled": true}
+	req, _ := http.NewRequest("GET", p.URL+"/api/oidc/clients/"+id, nil)
+	req.Header.Set("X-API-KEY", p.APIKey)
+	resp, err := p.HC.Do(req)
+	if err != nil {
+		p.T.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		p.Admin("POST", "/api/oidc/clients", body, nil)
+	}
+}
+
 // Browser returns a logged-in browser session (one-time access token instead of a passkey).
 func (p *PocketID) Browser(userID string) *http.Client {
 	var tok struct{ Token string }
