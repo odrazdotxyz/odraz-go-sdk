@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	odraz "github.com/odraz/sdk"
+	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 )
 
 func TestCleanPath(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	odraz "github.com/odraz/sdk"
+	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 )
 
 // SecretStore persists secrets per account. Apps implement it on top of

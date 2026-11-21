@@ -1,3 +1,3 @@
-module github.com/odraz/sdk
+module github.com/odrazdotxyz/odraz-go-sdk
 
 go 1.23

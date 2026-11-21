@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	odraz "github.com/odraz/sdk"
+	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 )
 
 // CredKind says how Credentials are applied to requests.

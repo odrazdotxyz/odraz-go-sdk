@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	odraz "github.com/odraz/sdk"
+	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 )
 
 func TestMemoryStore(t *testing.T) {

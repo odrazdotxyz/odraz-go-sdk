@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	odraz "github.com/odraz/sdk"
+	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 )
 
 // CleanPath normalizes a drive-relative path: it always starts with "/",
