@@ -141,7 +141,7 @@ same host are followed. `testenv/proxy` reproduces all three variants.
 
 ```sh
 go test ./...                                   # unit tests, in-memory and in-process fake server
-eval "$(testenv/webdav/seed.sh >/dev/null; echo export ODRAZ_TEST_WEBDAV_URL=http://localhost:8081/dav)"
+testenv/webdav/seed.sh && export ODRAZ_TEST_WEBDAV_URL=http://localhost:8081/dav
 eval "$(testenv/opencloud/seed.sh)"             # needs Docker
 eval "$(testenv/proxy/seed.sh)"
 go test -race ./...                             # now also runs against the real servers
