@@ -84,10 +84,25 @@ func (f *FS) Read(ctx context.Context, p string, off, n int64) (io.ReadCloser, e
 	}
 	resp, err := f.C.Do(ctx, dav.Request{Method: "GET", Path: p, Header: h})
 	if err != nil {
-		if dav.Status(err) == http.StatusRequestedRangeNotSatisfiable {
+		switch dav.Status(err) {
+		case http.StatusRequestedRangeNotSatisfiable:
 			return io.NopCloser(eofReader{}), nil // at or past EOF
+		case http.StatusNotFound, http.StatusMethodNotAllowed:
+			// Some servers answer a GET on a folder this way (Apache: 404).
+			if f.isFolder(ctx, p) {
+				return nil, folderErr(p)
+			}
 		}
 		return nil, err
+	}
+	if resp.ContentLength == 0 {
+		// OpenCloud answers a GET on a folder with an empty 200, which looks
+		// like an empty file: confirm before returning.
+		resp.Body.Close()
+		if f.isFolder(ctx, p) {
+			return nil, folderErr(p)
+		}
+		return io.NopCloser(eofReader{}), nil
 	}
 	if resp.StatusCode == http.StatusPartialContent || (off == 0 && n < 0) {
 		return resp.Body, nil
@@ -104,6 +119,15 @@ func (f *FS) Read(ctx context.Context, p string, off, n int64) (io.ReadCloser, e
 		return resp.Body, nil
 	}
 	return &limited{io.LimitReader(resp.Body, n), resp.Body}, nil
+}
+
+func (f *FS) isFolder(ctx context.Context, p string) bool {
+	st, err := f.Stat(ctx, p)
+	return err == nil && st.IsDir
+}
+
+func folderErr(p string) error {
+	return fmt.Errorf("webdav: %s is a folder, not a file: %w", p, odraz.ErrInvalidPath)
 }
 
 type eofReader struct{}

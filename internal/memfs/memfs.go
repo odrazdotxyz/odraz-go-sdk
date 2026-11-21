@@ -69,8 +69,11 @@ func (m *memFS) Read(_ context.Context, p string, off, n int64) (io.ReadCloser, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	nd, ok := m.nodes[p]
-	if !ok || nd.dir {
+	if !ok {
 		return nil, nf(p)
+	}
+	if nd.dir {
+		return nil, fmt.Errorf("%s is a folder: %w", p, odraz.ErrInvalidPath)
 	}
 	d := nd.data
 	if off > int64(len(d)) {

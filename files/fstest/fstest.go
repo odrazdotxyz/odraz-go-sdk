@@ -14,6 +14,7 @@
 //     source or missing target parent returns ErrNotFound.
 //   - Read past the end of a file is truncated; reads starting at or beyond EOF
 //     are not tested because backends disagree (e.g. 416).
+//   - Read on a folder returns ErrInvalidPath (not data, not ErrNotFound).
 //   - Backends without RealDirectories skip the empty-folder test.
 package fstest
 
@@ -211,6 +212,20 @@ var cases = []testCase{
 			if string(b) != c.want {
 				e.t.Errorf("Read(off=%d,n=%d) = %q, want %q", c.off, c.n, b, c.want)
 			}
+		}
+	}},
+	{"ReadFolder", false, func(e *env) {
+		must(e.t, e.fs.Mkdir(e.ctx, e.p("fold")))
+		for _, c := range [][2]int64{{0, -1}, {0, 5}, {3, -1}} {
+			rc, err := e.fs.Read(e.ctx, e.p("fold"), c[0], c[1])
+			if err == nil {
+				rc.Close()
+			}
+			e.wantErr(err, odraz.ErrInvalidPath)
+		}
+		e.put("empty-file", "") // an empty file must still read as an empty file
+		if e.get(e.p("empty-file")) != "" {
+			e.t.Error("empty file must read as empty")
 		}
 	}},
 	{"WriteOverwrite", false, func(e *env) {
