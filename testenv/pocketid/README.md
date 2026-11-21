@@ -24,5 +24,4 @@ the tests avoid passkeys: create a user and an OIDC client, then log the "browse
 | Refresh | works with `offline_access`; the refresh token rotates, and the old one was still accepted when replayed |
 | Admin API | `POST /api/users`, `POST /api/oidc/clients` (`id`, `name`, `callbackURLs`, `isPublic`, `pkceEnabled`), `DELETE` of both |
 
-Not covered: OpenCloud trusting Pocket ID as its issuer (see the Pocket ID guide for OpenCloud: public
-clients, `opencloud_role` claim, `PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD`).
+OpenCloud trusting Pocket ID as its issuer is covered by `testenv/opencloud-pocketid`.
