@@ -1,0 +1,16 @@
+# OpenCloud with its built-in IdP, self-signed HTTPS on https://localhost:9200 (the built-in IdP requires https).
+# Admin user: admin / admin. Run seed.sh to (re)create it and mint an app token.
+services:
+  opencloud:
+    image: opencloudeu/opencloud-rolling:latest
+    entrypoint: ["/bin/sh", "-c", "opencloud init --admin-password admin --insecure yes || true; opencloud server"]
+    ports: ["9200:9200"]
+    environment:
+      OC_URL: https://localhost:9200
+      OC_INSECURE: "true"
+      PROXY_HTTP_ADDR: 0.0.0.0:9200
+      PROXY_ENABLE_BASIC_AUTH: "true"   # lets the seed script / probes use the admin password
+      PROXY_ENABLE_APP_AUTH: "true"     # app tokens as Basic auth: what the adapter uses in v1
+      OC_ADD_RUN_SERVICES: auth-app
+      OC_LOG_LEVEL: warn
+    tmpfs: ["/etc/opencloud:uid=1000,gid=1000", "/var/lib/opencloud:uid=1000,gid=1000"]   # fresh state on every `up`
