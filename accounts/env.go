@@ -48,7 +48,7 @@ type Env struct {
 func newEnv(ctx context.Context, acc Account, store SecretStore) (*Env, error) {
 	env := &Env{Account: acc, Headers: map[string]string{}}
 	if store != nil {
-		env.Creds = storeProvider{id: acc.ID, store: store}
+		env.Creds = storeProvider{id: acc.ID, store: store, cfg: acc.Config}
 	}
 	for k, v := range acc.Config {
 		if name, ok := strings.CutPrefix(k, ConfigHeaderPrefix); ok && name != "" {
@@ -92,6 +92,7 @@ func newEnv(ctx context.Context, acc Account, store SecretStore) (*Env, error) {
 type storeProvider struct {
 	id    string
 	store SecretStore
+	cfg   map[string]string // the username is not secret and lives in Account.Config
 }
 
 func (p storeProvider) Credentials(ctx context.Context) (Credentials, error) {
@@ -105,10 +106,13 @@ func (p storeProvider) Credentials(ctx context.Context) (Credentials, error) {
 		}
 		return c, nil
 	}
-	user, err := p.store.Get(ctx, p.id, SecretUsername)
-	if err != nil {
+	user := p.cfg[SecretUsername]
+	if b, err := p.store.Get(ctx, p.id, SecretUsername); err == nil {
+		user = string(b) // an adapter may declare the username secret
+	}
+	if user == "" {
 		return Credentials{}, fmt.Errorf("no credentials stored for account %s: %w", p.id, odraz.ErrAuth)
 	}
 	pw, _ := p.store.Get(ctx, p.id, SecretPassword)
-	return Credentials{Kind: CredBasic, Username: string(user), Password: string(pw)}, nil
+	return Credentials{Kind: CredBasic, Username: user, Password: string(pw)}, nil
 }

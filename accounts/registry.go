@@ -23,6 +23,8 @@ type Adapter struct {
 	// Domains maps each supported domain to its typed factory (e.g.
 	// files.Factory). Values are interpreted by the domain package.
 	Domains map[Domain]any
+	// Refresh, if set, renews expiring bearer credentials (OIDC adapters).
+	Refresh RefreshFunc
 	// Validate checks that the account works (reachable, credentials ok) and
 	// returns ErrAuth, ErrNotFound or ErrBlockedByProxy with a clear message.
 	Validate func(ctx context.Context, env *Env) error
@@ -77,7 +79,7 @@ type Handle struct {
 
 // Open resolves the adapter and builds its environment (credentials, extra
 // headers, client certificate) from the account and the secret store.
-func Open(ctx context.Context, acc Account, store SecretStore) (*Handle, error) {
+func Open(ctx context.Context, acc Account, store SecretStore, opts ...OpenOption) (*Handle, error) {
 	a, ok := Lookup(acc.Adapter)
 	if !ok {
 		return nil, fmt.Errorf("accounts: adapter %q is not registered: %w", acc.Adapter, odraz.ErrUnsupported)
@@ -86,8 +88,27 @@ func Open(ctx context.Context, acc Account, store SecretStore) (*Handle, error) 
 	if err != nil {
 		return nil, err
 	}
+	var o openOptions
+	for _, f := range opts {
+		f(&o)
+	}
+	refresh := a.Refresh
+	if o.refresh != nil {
+		refresh = o.refresh
+	}
+	if sp, ok := env.Creds.(storeProvider); ok && refresh != nil {
+		env.Creds = newRefreshingProvider(sp, refresh)
+	}
 	return &Handle{Account: acc, Env: env, adapter: a}, nil
 }
+
+type openOptions struct{ refresh RefreshFunc }
+
+// OpenOption customizes Open.
+type OpenOption func(*openOptions)
+
+// WithRefresh overrides the adapter's credential refresh hook.
+func WithRefresh(f RefreshFunc) OpenOption { return func(o *openOptions) { o.refresh = f } }
 
 // Adapter returns the adapter description.
 func (h *Handle) Adapter() Adapter { return h.adapter }
