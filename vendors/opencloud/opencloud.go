@@ -105,6 +105,7 @@ type client struct {
 
 	mu     sync.Mutex
 	spaces map[string]string // drive ID -> WebDAV URL
+	ro     map[string]bool   // drive ID -> read-only
 }
 
 func newClient(_ context.Context, env *accounts.Env) (files.Client, error) {
@@ -112,7 +113,7 @@ func newClient(_ context.Context, env *accounts.Env) (files.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &client{api: api, env: env, spaces: map[string]string{}}, nil
+	return &client{api: api, env: env, spaces: map[string]string{}, ro: map[string]bool{}}, nil
 }
 
 func (c *client) list(ctx context.Context) ([]graphDrive, error) {
@@ -127,6 +128,7 @@ func (c *client) list(ctx context.Context) ([]graphDrive, error) {
 	for _, d := range res.Value {
 		if d.Root.WebDavURL != "" {
 			c.spaces[d.ID] = d.Root.WebDavURL
+			c.ro[d.ID] = readOnly(d)
 		}
 	}
 	return res.Value, nil
@@ -139,7 +141,7 @@ func (c *client) Drives(ctx context.Context) ([]files.Drive, error) {
 	}
 	out := make([]files.Drive, 0, len(gd))
 	for _, d := range gd {
-		out = append(out, files.Drive{ID: d.ID, Name: d.Name, Kind: kind(d.DriveType), Quota: quota(d)})
+		out = append(out, files.Drive{ID: d.ID, Name: d.Name, Kind: kind(d.DriveType), Quota: quota(d), ReadOnly: readOnly(d)})
 	}
 	return out, nil
 }
@@ -155,6 +157,11 @@ func kind(t string) files.DriveKind {
 	}
 	return files.DriveOther
 }
+
+// readOnly is true for the virtual Shares space: it only lists mounted shares,
+// so creating, moving or deleting at its root does not work. Writing into a
+// share belongs to the sharing domain (v1 does not open shares as spaces).
+func readOnly(d graphDrive) bool { return d.DriveType == "virtual" }
 
 // quota maps Graph quota: total 0 means unlimited, reported as Total -1.
 func quota(d graphDrive) *files.Quota {
@@ -191,7 +198,17 @@ func (c *client) OpenDrive(ctx context.Context, id string) (files.FS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return files.Wrap(&davfs.FS{C: d}), nil
+	fs := files.Wrap(&davfs.FS{C: d})
+	if c.readOnly(id) {
+		fs = files.ReadOnly(fs)
+	}
+	return fs, nil
+}
+
+func (c *client) readOnly(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ro[id]
 }
 
 // spaceURL takes the path from the URL the API returned but keeps the scheme

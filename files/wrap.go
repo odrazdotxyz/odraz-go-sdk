@@ -2,7 +2,10 @@ package files
 
 import (
 	"context"
+	"fmt"
 	"io"
+
+	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 )
 
 // Wrap returns an FS that normalizes every path with CleanPath before
@@ -96,3 +99,28 @@ func (c *cleanFS) Delete(ctx context.Context, p string, rec bool) error {
 }
 
 func (c *cleanFS) Capabilities() Capabilities { return c.in.Capabilities() }
+
+// ReadOnly returns an FS that serves reads from inner and rejects every
+// mutation with an error matching odraz.ErrPermission. Capabilities report
+// ReadOnly. Optional write interfaces (Copier) are not exposed.
+func ReadOnly(inner FS) FS { return &readOnlyFS{inner} }
+
+type readOnlyFS struct{ FS }
+
+func roErr(op, p string) error {
+	return fmt.Errorf("files: %s %s: this drive is read-only: %w", op, p, odraz.ErrPermission)
+}
+
+func (r *readOnlyFS) Write(_ context.Context, p string, _ io.Reader, _ WriteOptions) error {
+	return roErr("write", p)
+}
+func (r *readOnlyFS) Mkdir(_ context.Context, p string) error { return roErr("mkdir", p) }
+func (r *readOnlyFS) Move(_ context.Context, from, _ string, _ bool) error {
+	return roErr("move", from)
+}
+func (r *readOnlyFS) Delete(_ context.Context, p string, _ bool) error { return roErr("delete", p) }
+func (r *readOnlyFS) Capabilities() Capabilities {
+	c := r.FS.Capabilities()
+	c.ReadOnly, c.AtomicMove, c.ServerSideCopy = true, false, false
+	return c
+}

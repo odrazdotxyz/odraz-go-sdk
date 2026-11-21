@@ -96,6 +96,27 @@ func TestDrivesMapping(t *testing.T) {
 	}
 }
 
+func TestSharesDriveIsReadOnly(t *testing.T) {
+	srv := fakeGraph(t)
+	cl := openClient(t, srv.URL, "u", "tok", nil)
+	ds, _ := cl.Drives(ctx)
+	for _, d := range ds {
+		if d.ReadOnly != (d.Kind == files.DriveShared) {
+			t.Errorf("drive %s: ReadOnly=%v", d.ID, d.ReadOnly)
+		}
+	}
+	fs, err := cl.OpenDrive(ctx, "s$3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Capabilities().ReadOnly {
+		t.Error("shares FS must report ReadOnly")
+	}
+	if err := fs.Mkdir(ctx, "/x"); !errors.Is(err, odraz.ErrPermission) {
+		t.Errorf("mkdir on shares: %v", err)
+	}
+}
+
 func TestOpenDriveUsesConfiguredHost(t *testing.T) {
 	// The API says https://public.example/...; the client must keep talking to
 	// the configured server and only take the path from the API.
@@ -238,6 +259,20 @@ func TestConformanceRealDrives(t *testing.T) {
 	}
 	if personal == "" || !strings.Contains(strings.Join(kinds, ","), "shared") {
 		t.Fatalf("expected personal and shared drives, got %v", kinds)
+	}
+	for _, d := range ds {
+		if d.Kind == files.DriveShared {
+			fs, err := cl.OpenDrive(ctx, d.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fs.List(ctx, "/"); err != nil {
+				t.Errorf("listing the shares space: %v", err)
+			}
+			if err := fs.Mkdir(ctx, "/x"); !errors.Is(err, odraz.ErrPermission) {
+				t.Errorf("mkdir on shares: %v", err)
+			}
+		}
 	}
 	for name, id := range map[string]string{"personal": personal, "project": project} {
 		id := id

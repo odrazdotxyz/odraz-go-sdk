@@ -168,3 +168,30 @@ func TestWrapKeepsCopier(t *testing.T) {
 		t.Error("memfs has no Copier; Wrap must not invent one")
 	}
 }
+
+func TestReadOnly(t *testing.T) {
+	inner := memfs.New()
+	put(t, inner, "/a.txt", "x")
+	fs := files.ReadOnly(inner)
+	if !fs.Capabilities().ReadOnly {
+		t.Error("capabilities must report ReadOnly")
+	}
+	if st, err := fs.Stat(ctx, "/a.txt"); err != nil || st.Size != 1 {
+		t.Errorf("reads must work: %v", err)
+	}
+	for name, err := range map[string]error{
+		"write":  fs.Write(ctx, "/b", strings.NewReader("y"), files.WriteOptions{}),
+		"mkdir":  fs.Mkdir(ctx, "/d"),
+		"move":   fs.Move(ctx, "/a.txt", "/c", true),
+		"delete": fs.Delete(ctx, "/a.txt", true),
+		"copy":   files.Copy(ctx, fs, "/a.txt", "/e", false),
+		"upload": files.Upload(ctx, fs, "/f/g", strings.NewReader("y"), files.WriteOptions{}),
+	} {
+		if !errors.Is(err, odraz.ErrPermission) {
+			t.Errorf("%s: err = %v, want ErrPermission", name, err)
+		}
+	}
+	if _, err := inner.Stat(ctx, "/a.txt"); err != nil {
+		t.Error("source must be untouched")
+	}
+}

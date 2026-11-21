@@ -27,6 +27,9 @@ type Drive struct {
 	Name  string
 	Kind  DriveKind
 	Quota *Quota // nil if the backend reports none
+	// ReadOnly drives can be browsed and read but not modified (for example
+	// OpenCloud's virtual Shares space). The zero value means writable.
+	ReadOnly bool
 }
 
 // Entry describes a file or folder. Path is cleaned and drive-relative.
@@ -45,7 +48,8 @@ type Capabilities struct {
 	AtomicMove      bool // Move is a single atomic server operation
 	RealDirectories bool // empty folders exist (false for object stores)
 	RangeRead       bool // Read honours offset/length natively
-	ServerSideCopy  bool // reserved: server can copy without download
+	ServerSideCopy  bool // server can copy without download (files.Copier)
+	ReadOnly        bool // every mutating call fails with ErrPermission
 }
 
 // WriteOptions control FS.Write.
