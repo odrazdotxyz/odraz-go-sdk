@@ -143,9 +143,12 @@ acc := accounts.Account{ID: "home", Adapter: "opencloud",
 Verified against a fake provider (discovery, PKCE, state, code replay, refresh rotation, revocation) and
 against a **real OpenCloud with its built-in IdP** (`testenv/opencloud`): login with a registered third-party
 client, the token on the Graph API and WebDAV, refresh before expiry, recovery from a rejected token, and the
-refusals (unregistered client, wrong password, code replay). **Not yet verified against Pocket ID or another
-external provider**: run `go run ./examples/oidc-login -server <url> -client-id <id>` against yours (add
-`-insecure` for self-signed certificates) and tell us what happens.
+refusals (unregistered client, wrong password, code replay). It is also verified against **Pocket ID**
+(`testenv/pocketid`) as a standalone provider: discovery without WebFinger, the desktop loopback redirect on a
+random port, code exchange with PKCE, userinfo with the token, refresh, and refusals (unregistered redirect,
+unknown client, bogus refresh token). **Not verified: OpenCloud accepting Pocket ID's tokens end to end** (that
+is OpenCloud admin configuration; see `testenv/pocketid/README.md`). To try your own setup run
+`go run ./examples/oidc-login -server <url> -client-id <id>` (add `-insecure` for self-signed certificates).
 
 ## Auth proxies
 
