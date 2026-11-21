@@ -1,0 +1,151 @@
+# Odraz SDK
+
+One Go interface for self-hosted clouds. Apps (web gateway, mobile via gomobile, desktop via Wails)
+import the SDK and talk to OpenCloud, any WebDAV server, and later other backends through the same
+types, without knowing the protocol underneath.
+
+```
+go get github.com/odrazdotxyz/odraz-go-sdk
+```
+
+Go 1.23+. Status: **v1 = accounts + files** with a generic WebDAV adapter and an OpenCloud adapter.
+
+## Domains
+
+The SDK is organized by domain. A vendor adapter declares which domains it supports; an app asks an
+account for a domain and gets `ErrUnsupported` if the backend has none.
+
+| Domain | Package | Status |
+|---|---|---|
+| accounts (shared) | `accounts` | v1 |
+| files | `files` | v1 |
+| calendar (CalDAV) | `calendar` | planned |
+| contacts (CardDAV) | `contacts` | planned |
+| sharing, photos | | planned |
+
+Domain packages are protocol-neutral: no WebDAV types appear in `files`. Adding a vendor or a domain does
+not change existing domains (`files.ForAccount` today, `calendar.ForAccount` later, same pattern).
+
+| Adapter | Package | Domains | Login |
+|---|---|---|---|
+| WebDAV | `drivers/webdav` | files | username + password |
+| OpenCloud | `vendors/opencloud` | files | username + app token (OIDC browser login: next phase) |
+
+## Usage
+
+The full, compile-checked version is [`example_test.go`](example_test.go).
+
+```go
+import (
+    "github.com/odrazdotxyz/odraz-go-sdk/accounts"
+    "github.com/odrazdotxyz/odraz-go-sdk/files"
+    _ "github.com/odrazdotxyz/odraz-go-sdk/vendors/opencloud" // registers the adapter
+)
+
+store := myKeychainStore // your accounts.SecretStore; accounts.NewMemoryStore() is for tests only
+
+// Add an account from form values: secrets go to the store, the rest is Account.Config.
+acc, err := accounts.Configure(ctx, store,
+    accounts.Account{ID: "home", Label: "Home", Adapter: "opencloud"}, "app-token",
+    map[string]string{"url": "https://cloud.example.org", "username": "alice", "password": "<app token>"})
+
+err = accounts.Validate(ctx, acc, store)         // ErrAuth / ErrNotFound / ErrBlockedByProxy
+
+handle, _ := accounts.Open(ctx, acc, store)
+client, _ := files.ForAccount(ctx, handle)       // ErrUnsupported if no files domain
+drives, _ := client.Drives(ctx)                  // personal, project, shared...
+fs, _ := client.OpenDrive(ctx, drives[0].ID)
+
+entries, _ := fs.List(ctx, "/")
+err = files.Upload(ctx, fs, "/notes/hello.txt", r, files.WriteOptions{Size: n, Overwrite: true})
+err = files.DownloadFile(ctx, fs, "/notes/hello.txt", "/tmp/hello.txt", files.DownloadOptions{}) // resumes
+```
+
+Which fields a UI must show comes from the adapter, not from the server: `accounts.Adapters()` lists the
+registered adapters, each with its `AuthMethods` (and their `Fields`) and connection `Fields`.
+
+### What `files.FS` gives you
+
+`Stat`, `List` (one level), `Read` (offset/length), `Write` (streaming, size, progress), `Mkdir` (creates
+parents, idempotent), `Move`, `Delete` (recursive flag), `Capabilities`. Helpers: `Upload`, `UploadFile`,
+`Download`, `DownloadFile` (resumes via a `.part` file), `Rename`, `Walk`, `Copy` (server-side when the
+backend supports it, otherwise read+write), `ReadOnly`.
+
+- Paths are `/`-separated and relative to the drive root. They are normalized by the `files` package;
+  `..` can never escape the root (`ErrInvalidPath`, which also matches `ErrPermission`).
+- Overwrite defaults to `false` and gives `ErrExists`. Deleting a non-empty folder without `recursive`
+  gives `ErrNotEmpty`. Writing into a missing parent folder gives `ErrNotFound` (use `files.Upload`,
+  which creates parents).
+- Errors work with `errors.Is` and always wrap the original error: `ErrNotFound`, `ErrExists`,
+  `ErrNotEmpty`, `ErrPermission`, `ErrUnsupported`, `ErrAuth`, `ErrBlockedByProxy`, `ErrInvalidPath`.
+- Optional features are optional interfaces, found by type assertion: `files.Copier` today, `Previewer`
+  and `EditorOpener` reserved.
+
+## Capabilities
+
+`fs.Capabilities()` tells you what the backend does natively. What every adapter must do is the same
+(`files/fstest`); capabilities only describe how.
+
+| Capability | WebDAV (Apache `mod_dav`) | OpenCloud personal / project | OpenCloud Shares space |
+|---|---|---|---|
+| `AtomicMove` | yes | yes | no |
+| `RealDirectories` | yes | yes | yes |
+| `RangeRead` | yes | yes | yes |
+| `ServerSideCopy` | yes | yes | no |
+| `ReadOnly` | no | no | **yes** (`Drive.ReadOnly`) |
+
+Other behaviour worth knowing:
+
+- Other WebDAV servers: `Capabilities` is static for the generic adapter. Servers without `COPY`,
+  `MKCOL` on nested paths, or `Range` are not detected yet; run `files/fstest` against yours.
+- "Overwrite = false" is a stat followed by a PUT. Some servers ignore `If-None-Match: *` (OpenCloud
+  does), so there is a small race window between the two requests.
+- Deleting a non-empty folder without `recursive` is a list followed by a DELETE (WebDAV DELETE is always
+  recursive); same race window.
+- Reads at or past the end of a file return no data on every backend.
+- Uploads are a single PUT. TUS (resumable uploads) is planned.
+- OpenCloud quota with `total: 0` means unlimited and is reported as `Quota.Total == -1`.
+
+## Auth proxies
+
+Self-hosted servers often sit behind an access proxy (Pangolin, Cloudflare Access, an mTLS gateway).
+Every adapter supports, through the same field system:
+
+- **Extra headers on every request.** In forms: `header.<Name>` for plain values, `secret_header.<Name>` for
+  secret ones. Secret values go through your `SecretStore`, never `Account.Config`.
+  ```go
+  accounts.Configure(ctx, store, acc, "basic", map[string]string{
+      "url": "https://dav.example.org", "username": "u", "password": "p",
+      "secret_header.P-Access-Token-Id": "...", "secret_header.P-Access-Token": "...",
+  })
+  ```
+- **Client certificate (mTLS):** `client_cert` and `client_key` (PEM, stored as secrets).
+- **Skip TLS verification** (`insecure_skip_verify=true`) for self-signed certificates. This allows
+  interception; make users opt in explicitly.
+
+**Detection.** If a response redirects to another host, or returns HTML where XML or JSON is expected (a
+login page), the shared transport returns `ErrBlockedByProxy` with a message saying where it went, so a UI
+can tell "wrong password" (`ErrAuth`) from "a gateway wants a different credential". Redirects within the
+same host are followed. `testenv/proxy` reproduces all three variants.
+
+## Embedding notes
+
+- The main API avoids generics and channels so it can be wrapped for gomobile later; `accounts.Open`
+  currently takes variadic options (`WithRefresh`), which a gomobile wrapper would hide.
+- Tokens that expire are refreshed before they do, through a pluggable `RefreshFunc`
+  (`Adapter.Refresh` or `accounts.WithRefresh`), saved back through `SecretStore`, and concurrent requests
+  share one refresh.
+- No global state except the adapter registry.
+
+## Development
+
+```sh
+go test ./...                                   # unit tests, in-memory and in-process fake server
+eval "$(testenv/webdav/seed.sh >/dev/null; echo export ODRAZ_TEST_WEBDAV_URL=http://localhost:8081/dav)"
+eval "$(testenv/opencloud/seed.sh)"             # needs Docker
+eval "$(testenv/proxy/seed.sh)"
+go test -race ./...                             # now also runs against the real servers
+```
+
+Real-server tests skip themselves when their `ODRAZ_TEST_*` variables are unset. See
+[CONTRIBUTING.md](CONTRIBUTING.md) to add a vendor adapter.
