@@ -115,6 +115,7 @@ func (c *Client) Do(ctx context.Context, r Request) (*http.Response, error) {
 		getBody = func() (io.Reader, error) { _, err := b.Seek(0, io.SeekStart); return b, err }
 	}
 	origHost := hostOf(c.base)
+	retried401 := false
 	for hop := 0; ; hop++ {
 		req, err := http.NewRequestWithContext(ctx, r.Method, target, body)
 		if err != nil {
@@ -126,7 +127,8 @@ func (c *Client) Do(ctx context.Context, r Request) (*http.Response, error) {
 		for k, v := range r.Header {
 			req.Header[k] = v
 		}
-		if err := c.decorate(ctx, req); err != nil {
+		used, err := c.decorate(ctx, req)
+		if err != nil {
 			return nil, err
 		}
 		resp, err := c.hc.Do(req)
@@ -135,6 +137,20 @@ func (c *Client) Do(ctx context.Context, r Request) (*http.Response, error) {
 				return nil, ctx.Err()
 			}
 			return nil, fmt.Errorf("dav: %s %s: %w", r.Method, target, err)
+		}
+		if resp.StatusCode == http.StatusUnauthorized && !retried401 && used.Kind == accounts.CredBearer {
+			// Invalidate first: even if this request cannot be replayed (a
+			// streaming upload), the caller's next attempt gets fresh credentials.
+			if inv, ok := c.creds.(accounts.Invalidator); ok && inv.Invalidate(ctx, used) && (r.Body == nil || getBody != nil) {
+				resp.Body.Close()
+				retried401 = true
+				if r.Body != nil {
+					if body, err = getBody(); err != nil {
+						return nil, err
+					}
+				}
+				continue // once, with freshly refreshed credentials
+			}
 		}
 		if isRedirect(resp.StatusCode) && resp.Header.Get("Location") != "" {
 			loc, err := req.URL.Parse(resp.Header.Get("Location"))
@@ -178,17 +194,18 @@ func (c *Client) Do(ctx context.Context, r Request) (*http.Response, error) {
 	}
 }
 
-func (c *Client) decorate(ctx context.Context, req *http.Request) error {
+// decorate adds headers and credentials, and returns the credentials used.
+func (c *Client) decorate(ctx context.Context, req *http.Request) (accounts.Credentials, error) {
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("User-Agent", c.ua)
 	if c.creds == nil {
-		return nil
+		return accounts.Credentials{}, nil
 	}
 	cr, err := c.creds.Credentials(ctx)
 	if err != nil {
-		return fmt.Errorf("dav: credentials: %w", err)
+		return cr, fmt.Errorf("dav: credentials: %w", err)
 	}
 	switch cr.Kind {
 	case accounts.CredBearer:
@@ -196,7 +213,7 @@ func (c *Client) decorate(ctx context.Context, req *http.Request) error {
 	case accounts.CredBasic:
 		req.SetBasicAuth(cr.Username, cr.Password)
 	}
-	return nil
+	return cr, nil
 }
 
 func isRedirect(code int) bool {

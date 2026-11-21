@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	odraz "github.com/odrazdotxyz/odraz-go-sdk"
@@ -12,6 +13,15 @@ import (
 // the refresh token). The result is saved through the SecretStore by the
 // provider; the hook itself must not persist anything.
 type RefreshFunc func(ctx context.Context, old Credentials) (Credentials, error)
+
+// Invalidator is implemented by credential providers that can recover from a
+// credential the server rejected (HTTP 401), e.g. a token revoked before its
+// expiry. The transport calls it once per request and retries if it returns true.
+type Invalidator interface {
+	// Invalidate marks the rejected credentials unusable. It returns true if
+	// a retry can succeed, i.e. fresh credentials can be obtained.
+	Invalidate(ctx context.Context, rejected Credentials) bool
+}
 
 // refreshSkew is how long before expiry credentials are refreshed.
 const refreshSkew = 30 * time.Second
@@ -24,6 +34,29 @@ type refreshingProvider struct {
 	refresh RefreshFunc
 	now     func() time.Time
 	lock    chan struct{} // 1-slot semaphore; unlike a mutex, waiting honours ctx
+
+	mu       sync.Mutex
+	rejected string // access token the server answered 401 to
+}
+
+var _ Invalidator = (*refreshingProvider)(nil)
+
+func (p *refreshingProvider) Invalidate(_ context.Context, rejected Credentials) bool {
+	if rejected.Kind != CredBearer || rejected.RefreshToken == "" || rejected.AccessToken == "" {
+		return false
+	}
+	p.mu.Lock()
+	p.rejected = rejected.AccessToken
+	p.mu.Unlock()
+	return true
+}
+
+// stale reports whether c must be refreshed: expired, or known to be rejected.
+func (p *refreshingProvider) stale(c Credentials) bool {
+	p.mu.Lock()
+	rejected := p.rejected
+	p.mu.Unlock()
+	return c.Expired(p.now(), refreshSkew) || (rejected != "" && c.AccessToken == rejected)
 }
 
 func newRefreshingProvider(base storeProvider, f RefreshFunc) *refreshingProvider {
@@ -32,7 +65,7 @@ func newRefreshingProvider(base storeProvider, f RefreshFunc) *refreshingProvide
 
 func (p *refreshingProvider) Credentials(ctx context.Context) (Credentials, error) {
 	c, err := p.base.Credentials(ctx)
-	if err != nil || !c.Expired(p.now(), refreshSkew) {
+	if err != nil || !p.stale(c) {
 		return c, err
 	}
 	select {
@@ -42,7 +75,7 @@ func (p *refreshingProvider) Credentials(ctx context.Context) (Credentials, erro
 		return Credentials{}, ctx.Err()
 	}
 	// Another caller may have refreshed while we waited.
-	if c, err = p.base.Credentials(ctx); err != nil || !c.Expired(p.now(), refreshSkew) {
+	if c, err = p.base.Credentials(ctx); err != nil || !p.stale(c) {
 		return c, err
 	}
 	if c.RefreshToken == "" && c.Kind == CredBearer {

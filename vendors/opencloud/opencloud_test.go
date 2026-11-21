@@ -10,7 +10,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 	"github.com/odrazdotxyz/odraz-go-sdk/accounts"
@@ -285,5 +288,83 @@ func TestConformanceRealDrives(t *testing.T) {
 				return fs
 			})
 		})
+	}
+}
+
+// OIDC: the account's tokens are refreshed through the provider discovered from the server URL.
+func TestOIDCRefreshWiring(t *testing.T) {
+	var current atomic.Value
+	current.Store("access-1")
+	var grants []string
+	var mu sync.Mutex
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/webfinger":
+			io.WriteString(w, `{"links":[{"rel":"http://openid.net/specs/connect/1.0/issuer","href":"`+srv.URL+`"}]}`)
+		case "/.well-known/openid-configuration":
+			io.WriteString(w, `{"issuer":"`+srv.URL+`","authorization_endpoint":"`+srv.URL+`/a","token_endpoint":"`+srv.URL+`/token"}`)
+		case "/token":
+			r.ParseForm()
+			mu.Lock()
+			grants = append(grants, r.Form.Get("grant_type")+" client="+r.Form.Get("client_id")+" rt="+r.Form.Get("refresh_token"))
+			mu.Unlock()
+			current.Store("access-2")
+			io.WriteString(w, `{"access_token":"access-2","refresh_token":"rt-2","expires_in":3600}`)
+		case "/graph/v1.0/me/drives":
+			if r.Header.Get("Authorization") != "Bearer "+current.Load().(string) {
+				w.WriteHeader(401)
+				return
+			}
+			io.WriteString(w, drivesJSON)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	st := accounts.NewMemoryStore()
+	// Expired access token + refresh token, as saved by oidc.Save after a login.
+	st.Put(ctx, "oc", accounts.SecretAccessToken, []byte("access-0"))
+	st.Put(ctx, "oc", accounts.SecretRefreshToken, []byte("rt-1"))
+	st.Put(ctx, "oc", accounts.SecretExpiry, []byte(time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)))
+	acc := accounts.Account{ID: "oc", Adapter: "opencloud", Config: map[string]string{"url": srv.URL, accounts.ConfigOIDCClientID: "odraz-app"}}
+	h, err := accounts.Open(ctx, acc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl, err := files.ForAccount(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds, err := cl.Drives(ctx)
+	if err != nil || len(ds) != 4 {
+		t.Fatalf("drives = %v, %v", ds, err)
+	}
+	if len(grants) != 1 || grants[0] != "refresh_token client=odraz-app rt=rt-1" {
+		t.Errorf("token requests = %v", grants)
+	}
+	if v, _ := st.Get(ctx, "oc", accounts.SecretRefreshToken); string(v) != "rt-2" {
+		t.Errorf("rotated refresh token not saved: %q", v)
+	}
+	// Without the client ID the account is not an OIDC account: no refresh, ErrAuth.
+	delete(acc.Config, accounts.ConfigOIDCClientID)
+	h, _ = accounts.Open(ctx, acc, st)
+	st.Put(ctx, "oc", accounts.SecretAccessToken, []byte("stale"))
+	cl, _ = files.ForAccount(ctx, h)
+	if _, err := cl.Drives(ctx); !errors.Is(err, odraz.ErrAuth) {
+		t.Errorf("non-OIDC account with a bad token: %v", err)
+	}
+}
+
+func TestOIDCMethodDeclared(t *testing.T) {
+	a, _ := accounts.Lookup("opencloud")
+	var kinds []string
+	for _, m := range a.AuthMethods {
+		kinds = append(kinds, m.ID+":"+string(m.Kind))
+	}
+	if strings.Join(kinds, ",") != "oidc:browser,app-token:form" {
+		t.Errorf("auth methods = %v", kinds)
 	}
 }

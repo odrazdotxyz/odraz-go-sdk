@@ -23,8 +23,10 @@ type Adapter struct {
 	// Domains maps each supported domain to its typed factory (e.g.
 	// files.Factory). Values are interpreted by the domain package.
 	Domains map[Domain]any
-	// Refresh, if set, renews expiring bearer credentials (OIDC adapters).
-	Refresh RefreshFunc
+	// Refresh, if set, returns the hook that renews expiring or rejected
+	// bearer credentials for an account (OIDC). It may return nil when the
+	// account does not use refreshable credentials.
+	Refresh func(env *Env) RefreshFunc
 	// Validate checks that the account works (reachable, credentials ok) and
 	// returns ErrAuth, ErrNotFound or ErrBlockedByProxy with a clear message.
 	Validate func(ctx context.Context, env *Env) error
@@ -92,7 +94,10 @@ func Open(ctx context.Context, acc Account, store SecretStore, opts ...OpenOptio
 	for _, f := range opts {
 		f(&o)
 	}
-	refresh := a.Refresh
+	var refresh RefreshFunc
+	if a.Refresh != nil {
+		refresh = a.Refresh(env)
+	}
 	if o.refresh != nil {
 		refresh = o.refresh
 	}

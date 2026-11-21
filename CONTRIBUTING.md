@@ -24,7 +24,8 @@ func init() {
         Fields:      append([]accounts.Field{{Name: "url", Label: "Server URL", Type: accounts.FieldURL, Required: true}}, accounts.ProxyFields...),
         Domains:     map[accounts.Domain]any{files.Domain: files.Factory(newClient)},
         Validate:    validate,
-        // Refresh:  only for expiring bearer tokens (OIDC).
+        // Refresh:  func(env *accounts.Env) accounts.RefreshFunc, only for refreshable bearer tokens
+        //           (OIDC): see vendors/opencloud, which reuses accounts/oidc.
     })
 }
 ```
@@ -35,9 +36,10 @@ need no declaration (`header.<Name>` / `secret_header.<Name>` are handled by `ac
 
 ## 4. Declare AuthMethods
 
-Each method has an ID, a label, a kind and, for forms, `Fields`. v1 supports `AuthForm`. Keep IDs stable;
-add new methods next to old ones (OpenCloud will add an OIDC `AuthBrowser` method without touching
-`app-token`).
+Each method has an ID, a label, a kind and, for forms, `Fields`. `AuthForm` methods are applied with
+`accounts.Configure`. `AuthBrowser` methods (OIDC) are driven by the app with `accounts/oidc`; declare the
+method so UIs can offer it, and wire `Adapter.Refresh` to `oidc.RefreshFunc`. Keep IDs stable and add new
+methods next to old ones (OpenCloud has both `app-token` and `oidc`).
 
 Secrets: a field with `Secret: true` goes to the `SecretStore` under its field name. The generic provider
 reads these keys: `username` (config or store), `password`, or `access_token` / `refresh_token` / `expiry`.

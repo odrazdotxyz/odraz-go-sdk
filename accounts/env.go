@@ -31,6 +31,10 @@ const (
 	// self-hosted servers with self-signed certificates. Insecure: the
 	// connection can be intercepted. UIs should make the user opt in explicitly.
 	ConfigInsecure = "insecure_skip_verify"
+	// ConfigOIDCClientID marks an account as logged in with OIDC and names the
+	// client ID the app registered with the provider. The app sets it when it
+	// saves the account after oidc.Save.
+	ConfigOIDCClientID = "oidc_client_id"
 )
 
 // ProxyFields describe the optional mTLS settings every adapter may expose.

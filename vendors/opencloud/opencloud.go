@@ -16,6 +16,7 @@ import (
 
 	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 	"github.com/odrazdotxyz/odraz-go-sdk/accounts"
+	"github.com/odrazdotxyz/odraz-go-sdk/accounts/oidc"
 	"github.com/odrazdotxyz/odraz-go-sdk/files"
 	"github.com/odrazdotxyz/odraz-go-sdk/internal/dav"
 	"github.com/odrazdotxyz/odraz-go-sdk/internal/davfs"
@@ -23,6 +24,11 @@ import (
 
 // Name is the registered adapter name.
 const Name = "opencloud"
+
+// AuthOIDC is the ID of the browser login method. The app drives it with
+// accounts/oidc (Begin, open the URL, Complete, Save), then stores the client
+// ID in Account.Config[accounts.ConfigOIDCClientID].
+const AuthOIDC = "oidc"
 
 // AuthAppToken is the ID of the v1 login method (Basic auth with an app token).
 // A browser-based OIDC method will be added next to it, without changing this one.
@@ -33,6 +39,11 @@ func init() {
 		Name:  Name,
 		Label: "OpenCloud",
 		AuthMethods: []accounts.AuthMethod{{
+			ID: AuthOIDC, Label: "Sign in with your browser (OIDC)", Kind: accounts.AuthBrowser,
+			// Supplied by the app, not typed by the user: the client ID the
+			// server's admin registered for the app with the identity provider.
+			Fields: []accounts.Field{{Name: accounts.ConfigOIDCClientID, Label: "OIDC client ID", Type: accounts.FieldText, Required: true}},
+		}, {
 			ID: AuthAppToken, Label: "Username and app token", Kind: accounts.AuthForm,
 			Fields: []accounts.Field{
 				{Name: accounts.SecretUsername, Label: "Username", Type: accounts.FieldText, Required: true},
@@ -43,7 +54,17 @@ func init() {
 		Fields:   append([]accounts.Field{{Name: "url", Label: "Server URL", Type: accounts.FieldURL, Required: true}}, accounts.ProxyFields...),
 		Domains:  map[accounts.Domain]any{files.Domain: files.Factory(newClient)},
 		Validate: validate,
+		Refresh:  refresher,
 	})
+}
+
+// refresher renews OIDC tokens; accounts using an app token have none.
+func refresher(env *accounts.Env) accounts.RefreshFunc {
+	id := env.Account.Config[accounts.ConfigOIDCClientID]
+	if id == "" {
+		return nil
+	}
+	return oidc.RefreshFunc(oidc.HTTPClient(env), env.Account.Config["url"], id)
 }
 
 func serverClient(env *accounts.Env) (*dav.Client, error) {

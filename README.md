@@ -29,7 +29,7 @@ not change existing domains (`files.ForAccount` today, `calendar.ForAccount` lat
 | Adapter | Package | Domains | Login |
 |---|---|---|---|
 | WebDAV | `drivers/webdav` | files | username + password |
-| OpenCloud | `vendors/opencloud` | files | username + app token (OIDC browser login: next phase) |
+| OpenCloud | `vendors/opencloud` | files | username + app token, or OIDC browser login |
 
 ## Usage
 
@@ -106,6 +106,44 @@ Other behaviour worth knowing:
 - Uploads are a single PUT. TUS (resumable uploads) is planned.
 - OpenCloud quota with `total: 0` means unlimited and is reported as `Quota.Total == -1`.
 
+## OIDC login (browser)
+
+For servers that trust an OpenID Connect provider (OpenCloud's built-in IdP, Pocket ID, Keycloak...),
+`accounts/oidc` does the authorization-code flow with PKCE as a public client: no client secret, no
+backend, no user database. The only thing stored is the token set, in your `SecretStore`.
+
+```go
+sess, _ := oidc.Begin(ctx, nil, "https://cloud.example.org", oidc.Config{
+    ClientID: "odraz-app", RedirectURI: redirectURI}) // webfinger + openid-configuration discovery
+// Open sess.AuthorizationURL in the system browser / custom tab. The redirect delivers callbackURL.
+tokens, err := sess.Complete(ctx, callbackURL)         // checks state, exchanges the code with the PKCE verifier
+err = oidc.Save(ctx, store, "home", tokens)
+acc := accounts.Account{ID: "home", Adapter: "opencloud",
+    Config: map[string]string{"url": "https://cloud.example.org", accounts.ConfigOIDCClientID: "odraz-app"}}
+// accounts.Open(ctx, acc, store) now refreshes tokens automatically.
+```
+
+- **The SDK never opens a browser**; the app does. `sess.Marshal()` / `oidc.Resume` keep a login alive if the
+  app is suspended while the user is in the browser. `oidc.NewLoopback()` receives the redirect on
+  `127.0.0.1` for desktop apps.
+- **Default scopes** are the minimum: `openid profile offline_access` (`profile` carries the username the
+  server maps users by, `offline_access` gives a refresh token).
+- **Refresh**: tokens are refreshed shortly before they expire, and once more if the server answers 401
+  (for example a revoked token), then the request is retried once. Requests with a streaming body (uploads)
+  are not replayed: that attempt fails with `ErrAuth`, the next one uses the fresh token. Concurrent requests
+  share one refresh; rotated refresh tokens are saved. Basic-auth app tokens are never retried.
+- **One-time setup per server**: the server's admin must register your app (client ID and redirect URI(s))
+  in the identity provider. Without that, the provider refuses the login; users can still use an app token.
+  Users are not registered anywhere: they log in with their existing provider account, and the server
+  maps the token to its user (OpenCloud: `preferred_username` by default). Both OpenCloud and your app must
+  trust the same provider.
+- ID tokens are not verified (they come straight from the token endpoint over TLS; the server validates the
+  access token on every request).
+
+Tested against a fake OIDC provider (discovery, PKCE, state, code replay, refresh rotation, revocation). It
+is **not yet verified against a real provider**: run `go run ./examples/oidc-login -server <url> -client-id <id>`
+against yours (add `-insecure` for self-signed certificates) and tell us what happens.
+
 ## Auth proxies
 
 Self-hosted servers often sit behind an access proxy (Pangolin, Cloudflare Access, an mTLS gateway).
@@ -132,7 +170,7 @@ same host are followed. `testenv/proxy` reproduces all three variants.
 
 - The main API avoids generics and channels so it can be wrapped for gomobile later; `accounts.Open`
   currently takes variadic options (`WithRefresh`), which a gomobile wrapper would hide.
-- Tokens that expire are refreshed before they do, through a pluggable `RefreshFunc`
+- Tokens that expire (or are rejected with 401) are refreshed through a pluggable `RefreshFunc`
   (`Adapter.Refresh` or `accounts.WithRefresh`), saved back through `SecretStore`, and concurrent requests
   share one refresh.
 - No global state except the adapter registry.
