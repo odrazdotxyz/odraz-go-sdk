@@ -1,4 +1,4 @@
-package webdav
+package davfs
 
 import (
 	"context"
@@ -12,9 +12,9 @@ import (
 	"github.com/odrazdotxyz/odraz-go-sdk/internal/dav"
 )
 
-// FS implements files.FS over a dav.Client. It is exported inside the module
-// tree so vendor adapters (OpenCloud) can reuse it for their space URLs; the
-// public API is still only files.FS.
+// FS implements files.FS over a dav.Client. Shared by the generic WebDAV adapter
+// and vendor adapters (OpenCloud) that expose WebDAV spaces. The
+// public API stays files.FS.
 type FS struct{ C *dav.Client }
 
 var _ files.FS = (*FS)(nil)

@@ -8,6 +8,7 @@ const (
 	FieldSecret FieldType = "secret"
 	FieldURL    FieldType = "url"
 	FieldNumber FieldType = "number"
+	FieldBool   FieldType = "bool" // value "true" or "false"
 )
 
 // Field describes one input a UI must collect.

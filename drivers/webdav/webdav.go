@@ -10,6 +10,7 @@ import (
 	"github.com/odrazdotxyz/odraz-go-sdk/accounts"
 	"github.com/odrazdotxyz/odraz-go-sdk/files"
 	"github.com/odrazdotxyz/odraz-go-sdk/internal/dav"
+	"github.com/odrazdotxyz/odraz-go-sdk/internal/davfs"
 )
 
 // Name is the registered adapter name.
@@ -67,7 +68,7 @@ func New(env *accounts.Env, url string) (files.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &client{label: env.Account.Label, fs: files.Wrap(&FS{C: c}), dav: c}, nil
+	return &client{label: env.Account.Label, fs: files.Wrap(&davfs.FS{C: c}), dav: c}, nil
 }
 
 func newClient(_ context.Context, env *accounts.Env) (files.Client, error) {

@@ -72,6 +72,10 @@ func SplitForm(fields []Field, values map[string]string) (config map[string]stri
 			if perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 				return nil, nil, &ValidationError{f.Name, "must be an http(s) URL"}
 			}
+		case FieldBool:
+			if v != "true" && v != "false" {
+				return nil, nil, &ValidationError{f.Name, "must be true or false"}
+			}
 		case FieldNumber:
 			if _, perr := strconv.ParseFloat(v, 64); perr != nil {
 				return nil, nil, &ValidationError{f.Name, "must be a number"}

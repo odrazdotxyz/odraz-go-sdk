@@ -27,11 +27,16 @@ const (
 const (
 	ConfigHeaderPrefix  = "header."        // header.<Name> = plain value
 	ConfigSecretHeaders = "secret_headers" // comma-separated names whose values are in the SecretStore as header.<Name>
+	// ConfigInsecure = "true" disables TLS certificate verification, for
+	// self-hosted servers with self-signed certificates. Insecure: the
+	// connection can be intercepted. UIs should make the user opt in explicitly.
+	ConfigInsecure = "insecure_skip_verify"
 )
 
 // ProxyFields describe the optional mTLS settings every adapter may expose.
 // Extra headers are open-ended and use the header.<Name> convention instead.
 var ProxyFields = []Field{
+	{Name: ConfigInsecure, Label: "Skip TLS certificate verification (insecure)", Type: FieldBool},
 	{Name: SecretClientCert, Label: "Client certificate (PEM)", Type: FieldSecret, Secret: true},
 	{Name: SecretClientKey, Label: "Client key (PEM)", Type: FieldSecret, Secret: true},
 }
@@ -82,6 +87,12 @@ func newEnv(ctx context.Context, acc Account, store SecretStore) (*Env, error) {
 		case errC == nil || errK == nil:
 			return nil, errors.New("accounts: client_cert and client_key must both be set")
 		}
+	}
+	if acc.Config[ConfigInsecure] == "true" {
+		if env.TLS == nil {
+			env.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		env.TLS.InsecureSkipVerify = true //nolint:gosec // explicit user opt-in
 	}
 	return env, nil
 }
