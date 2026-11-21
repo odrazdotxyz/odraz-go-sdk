@@ -1,0 +1,6 @@
+# Apache httpd + mod_dav. Basic auth: odraz / odraz-test. URL: http://localhost:8081/dav/
+services:
+  webdav:
+    build: .
+    ports: ["8081:80"]
+    tmpfs: ["/var/dav:uid=33,gid=33"]   # wiped on restart; run seed.sh after up
