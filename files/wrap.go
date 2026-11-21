@@ -7,7 +7,31 @@ import (
 
 // Wrap returns an FS that normalizes every path with CleanPath before
 // calling inner, so adapters never see unclean or root-escaping paths.
-func Wrap(inner FS) FS { return &cleanFS{inner} }
+// Optional interfaces of inner (currently Copier) are preserved.
+func Wrap(inner FS) FS {
+	c := &cleanFS{inner}
+	if cp, ok := inner.(Copier); ok {
+		return &cleanCopierFS{c, cp}
+	}
+	return c
+}
+
+type cleanCopierFS struct {
+	*cleanFS
+	cp Copier
+}
+
+func (c *cleanCopierFS) Copy(ctx context.Context, from, to string, ow bool) error {
+	from, err := CleanPath(from)
+	if err != nil {
+		return err
+	}
+	to, err = CleanPath(to)
+	if err != nil {
+		return err
+	}
+	return c.cp.Copy(ctx, from, to, ow)
+}
 
 type cleanFS struct{ in FS }
 

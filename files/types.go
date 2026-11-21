@@ -86,6 +86,12 @@ type Client interface {
 // Optional interfaces, detected by type assertion on FS. Reserved names;
 // not implemented in v1.
 type (
+	// Copier is implemented by backends with a native copy (WebDAV COPY).
+	// Use the Copy helper, which validates arguments and falls back to
+	// read+write when the FS does not implement it.
+	Copier interface {
+		Copy(ctx context.Context, from, to string, overwrite bool) error
+	}
 	// Previewer returns a thumbnail/preview image.
 	Previewer interface {
 		Preview(ctx context.Context, path string, width, height int) (io.ReadCloser, string, error)

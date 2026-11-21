@@ -341,6 +341,51 @@ var cases = []testCase{
 		e.wantErr(e.fs.Delete(e.ctx, e.p("nope"), false), odraz.ErrNotFound)
 		e.wantErr(e.fs.Delete(e.ctx, e.p("nope"), true), odraz.ErrNotFound)
 	}},
+	{"CopyFile", false, func(e *env) {
+		e.put("c1.txt", "copy me")
+		must(e.t, files.Copy(e.ctx, e.fs, e.p("c1.txt"), e.p("c2 ü.txt"), false))
+		if e.get(e.p("c1.txt")) != "copy me" || e.get(e.p("c2 ü.txt")) != "copy me" {
+			e.t.Error("copy must keep source and duplicate content")
+		}
+	}},
+	{"CopyFolder", false, func(e *env) {
+		must(e.t, e.fs.Mkdir(e.ctx, e.p("src/inner")))
+		e.put("src/a.txt", "A")
+		e.put("src/inner/b.txt", "B")
+		must(e.t, files.Copy(e.ctx, e.fs, e.p("src"), e.p("dst"), false))
+		if e.get(e.p("dst/a.txt")) != "A" || e.get(e.p("dst/inner/b.txt")) != "B" || e.get(e.p("src/inner/b.txt")) != "B" {
+			e.t.Error("folder copy incomplete")
+		}
+	}},
+	{"CopyOntoExisting", false, func(e *env) {
+		e.put("x", "XXX")
+		e.put("y", "YYY")
+		e.wantErr(files.Copy(e.ctx, e.fs, e.p("x"), e.p("y"), false), odraz.ErrExists)
+		if e.get(e.p("y")) != "YYY" {
+			e.t.Error("failed copy changed target")
+		}
+		must(e.t, files.Copy(e.ctx, e.fs, e.p("x"), e.p("y"), true))
+		if e.get(e.p("y")) != "XXX" {
+			e.t.Error("overwrite did not replace")
+		}
+		must(e.t, e.fs.Mkdir(e.ctx, e.p("d1")))
+		e.put("d1/old", "1")
+		must(e.t, e.fs.Mkdir(e.ctx, e.p("d2")))
+		e.put("d2/new", "2")
+		must(e.t, files.Copy(e.ctx, e.fs, e.p("d2"), e.p("d1"), true))
+		e.wantMissing(e.p("d1/old"))
+		if e.get(e.p("d1/new")) != "2" {
+			e.t.Error("folder overwrite must replace the target folder")
+		}
+	}},
+	{"CopyErrors", false, func(e *env) {
+		e.put("s", "x")
+		e.wantErr(files.Copy(e.ctx, e.fs, e.p("missing"), e.p("z"), false), odraz.ErrNotFound)
+		e.wantErr(files.Copy(e.ctx, e.fs, e.p("s"), e.p("no/parent/z"), false), odraz.ErrNotFound)
+		must(e.t, e.fs.Mkdir(e.ctx, e.p("dir/sub")))
+		e.wantErr(files.Copy(e.ctx, e.fs, e.p("dir"), e.p("dir/sub/self"), false), odraz.ErrInvalidPath)
+		e.wantErr(files.Copy(e.ctx, e.fs, e.p("dir"), e.p("dir"), true), odraz.ErrInvalidPath)
+	}},
 	{"CannotEscapeRoot", false, func(e *env) {
 		bad := []string{"/..", "../x", e.base + "/../../x", "/a/../../x"}
 		sentinel := fmt.Sprintf("escape-%d.txt", rand.Int63())

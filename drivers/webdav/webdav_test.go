@@ -58,6 +58,23 @@ func TestConformanceApache(t *testing.T) {
 	fstest.Run(t, func(t *testing.T) files.FS { return openFS(t, url, "odraz", "odraz-test") })
 }
 
+// plain hides optional interfaces (Copier) so files.Copy uses its fallback.
+type plain struct{ files.FS }
+
+func TestConformanceApacheCopyFallback(t *testing.T) {
+	url := os.Getenv("ODRAZ_TEST_WEBDAV_URL")
+	if url == "" {
+		t.Skip("ODRAZ_TEST_WEBDAV_URL not set")
+	}
+	fstest.Run(t, func(t *testing.T) files.FS {
+		fs := openFS(t, url, "odraz", "odraz-test")
+		if _, ok := fs.(files.Copier); !ok {
+			t.Fatal("webdav FS should implement Copier through Wrap")
+		}
+		return plain{fs}
+	})
+}
+
 func TestValidateAndErrors(t *testing.T) {
 	ctx := context.Background()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -20,7 +20,7 @@ type FS struct{ C *dav.Client }
 var _ files.FS = (*FS)(nil)
 
 func (f *FS) Capabilities() files.Capabilities {
-	return files.Capabilities{AtomicMove: true, RealDirectories: true, RangeRead: true, ServerSideCopy: false}
+	return files.Capabilities{AtomicMove: true, RealDirectories: true, RangeRead: true, ServerSideCopy: true}
 }
 
 func toEntry(r dav.Resource) files.Entry {
@@ -274,6 +274,33 @@ func (f *FS) Delete(ctx context.Context, p string, recursive bool) error {
 	}
 	resp, err := f.C.Do(ctx, dav.Request{Method: "DELETE", Path: p})
 	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+var _ files.Copier = (*FS)(nil)
+
+// Copy uses the WebDAV COPY method (server side).
+func (f *FS) Copy(ctx context.Context, from, to string, overwrite bool) error {
+	if _, err := f.Stat(ctx, from); err != nil {
+		return err
+	}
+	dir, _ := files.Split(to)
+	if par, err := f.Stat(ctx, dir); err != nil {
+		return err
+	} else if !par.IsDir {
+		return fmt.Errorf("webdav: parent of %s is not a folder: %w", to, odraz.ErrNotFound)
+	}
+	h := http.Header{}
+	h.Set("Destination", f.C.URL(to))
+	h.Set("Overwrite", map[bool]string{true: "T", false: "F"}[overwrite])
+	resp, err := f.C.Do(ctx, dav.Request{Method: "COPY", Path: from, Header: h})
+	if err != nil {
+		if dav.Status(err) == http.StatusConflict {
+			return fmt.Errorf("webdav: cannot copy %s to %s: %w: %w", from, to, odraz.ErrNotFound, err)
+		}
 		return err
 	}
 	resp.Body.Close()
