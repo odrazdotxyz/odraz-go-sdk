@@ -389,8 +389,10 @@ func TestPreview(t *testing.T) {
 		case r.Method == "GET" && r.URL.Path == "/dav/spaces/p1/odd.bin":
 			w.Header().Set("Content-Type", "application/octet-stream") // a server that ignores ?preview and sends the file
 			io.WriteString(w, "raw")
+		case r.Method == "GET" && r.URL.Path == "/dav/spaces/p1/dir" && r.URL.Query().Get("preview") == "1":
+			w.WriteHeader(400) // what real OpenCloud answers for a folder
 		case r.Method == "GET" && r.URL.Query().Get("preview") == "1":
-			w.WriteHeader(404) // no preview for text, a folder, or a missing path
+			w.WriteHeader(404) // no preview for this type, or a missing path
 		case r.Method == "PROPFIND":
 			res := map[string]string{
 				"/dav/spaces/p1/note.txt": `<resourcetype/>`, "/dav/spaces/p1/odd.bin": `<resourcetype/>`,
@@ -489,5 +491,8 @@ func TestRealPreview(t *testing.T) {
 	}
 	if _, _, err := files.Preview(ctx, fs, dir+"/blob.bin", 64, 64); !errors.Is(err, odraz.ErrUnsupported) {
 		t.Errorf("binary file: %v, want ErrUnsupported", err)
+	}
+	if _, _, err := files.Preview(ctx, fs, dir, 64, 64); !errors.Is(err, odraz.ErrInvalidPath) {
+		t.Errorf("folder: %v, want ErrInvalidPath", err)
 	}
 }

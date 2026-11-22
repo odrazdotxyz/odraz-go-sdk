@@ -263,8 +263,8 @@ func (f *previewFS) Preview(ctx context.Context, p string, width, height int) (i
 	q := url.Values{"preview": {"1"}, "x": {strconv.Itoa(width)}, "y": {strconv.Itoa(height)}, "a": {"1"}, "scalingup": {"0"}}
 	resp, err := f.C.Do(ctx, dav.Request{Method: "GET", URL: f.C.URL(p) + "?" + q.Encode()})
 	if err != nil {
-		if errors.Is(err, odraz.ErrNotFound) {
-			// Missing file, or a file the service cannot render: tell them apart.
+		if errors.Is(err, odraz.ErrNotFound) || dav.Status(err) == http.StatusBadRequest {
+			// 404: a missing file, or one the service cannot render; 400: a folder. Tell them apart.
 			if st, serr := f.Stat(ctx, p); serr == nil {
 				if st.IsDir {
 					return nil, "", fmt.Errorf("opencloud: %s is a folder: %w", p, odraz.ErrInvalidPath)
