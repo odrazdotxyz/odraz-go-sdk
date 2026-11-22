@@ -8,7 +8,7 @@ types, without knowing the protocol underneath.
 go get github.com/odrazdotxyz/odraz-go-sdk
 ```
 
-Go 1.23+. Status: **v1 = accounts + files** with a generic WebDAV adapter and an OpenCloud adapter.
+Go 1.23+. Status: **v1 = accounts + files** with a generic WebDAV adapter, an OpenCloud adapter and a Nextcloud adapter.
 
 ## Domains
 
@@ -30,6 +30,7 @@ not change existing domains (`files.ForAccount` today, `calendar.ForAccount` lat
 |---|---|---|---|
 | WebDAV | `drivers/webdav` | files | username + password |
 | OpenCloud | `vendors/opencloud` | files | username + app token, or OIDC browser login |
+| Nextcloud | `vendors/nextcloud` | files | username + app password |
 
 ## Usage
 
@@ -105,6 +106,11 @@ Other behaviour worth knowing:
 - Reads at or past the end of a file return no data on every backend.
 - Uploads are a single PUT. TUS (resumable uploads) is planned.
 - OpenCloud quota with `total: 0` means unlimited and is reported as `Quota.Total == -1`.
+- Nextcloud: the personal drive is the user's files. Each **Team folder** (Group folders app) the user can see
+  is also reported as a `DriveProject` drive with its own quota, and `ReadOnly` when the user has no write
+  permission. It still appears as a normal folder inside the personal drive, as in Nextcloud's own UI. Quota
+  changes can take a few minutes to show (Nextcloud caches them). OIDC login needs Nextcloud's `user_oidc`
+  app and is not supported yet.
 
 ## OIDC login (browser)
 
@@ -189,6 +195,7 @@ same host are followed. `testenv/proxy` reproduces all three variants.
 ```sh
 go test ./...                                   # unit tests, in-memory and in-process fake server
 testenv/webdav/seed.sh && export ODRAZ_TEST_WEBDAV_URL=http://localhost:8081/dav
+eval "$(testenv/nextcloud/seed.sh)"             # Nextcloud + Team folders, port 8082; needs Docker
 eval "$(testenv/opencloud/seed.sh)"             # needs Docker
 eval "$(testenv/proxy/seed.sh)"
 go test -race ./...                             # now also runs against the real servers

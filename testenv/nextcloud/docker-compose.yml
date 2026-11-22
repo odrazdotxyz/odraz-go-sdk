@@ -1,0 +1,12 @@
+# Nextcloud (SQLite, no cache) for the SDK's real-backend tests.
+# URL: http://localhost:8082   admin / admin-pass-123   Run seed.sh after the first `up`.
+services:
+  nextcloud:
+    image: nextcloud:latest
+    ports: ["8082:80"]
+    environment:
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: admin-pass-123
+      NEXTCLOUD_TRUSTED_DOMAINS: localhost
+      SQLITE_DATABASE: nextcloud
+    tmpfs: ["/var/www/html"]   # wiped on restart: run seed.sh again

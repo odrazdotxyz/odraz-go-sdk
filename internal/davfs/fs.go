@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 	"github.com/odrazdotxyz/odraz-go-sdk/files"
@@ -104,21 +106,51 @@ func (f *FS) Read(ctx context.Context, p string, off, n int64) (io.ReadCloser, e
 		}
 		return io.NopCloser(eofReader{}), nil
 	}
-	if resp.StatusCode == http.StatusPartialContent || (off == 0 && n < 0) {
+	if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		// Nextcloud answers a GET on a folder with an HTML listing: confirm before returning.
+		if f.isFolder(ctx, p) {
+			resp.Body.Close()
+			return nil, folderErr(p)
+		}
+	}
+	// Where the body starts in the file, and whether the server honoured the range.
+	start, honoured := int64(0), false
+	if resp.StatusCode == http.StatusPartialContent {
+		// Trust Content-Range over the request: Nextcloud answers "bytes=0-0" with the whole file.
+		if s, ok := contentRangeStart(resp.Header.Get("Content-Range")); ok {
+			start, honoured = s, true
+		} else {
+			start, honoured = off, true
+		}
+	}
+	if !honoured && off == 0 && n < 0 {
 		return resp.Body, nil
 	}
-	// Server ignored the Range header: skip and limit locally.
-	if _, err := io.CopyN(io.Discard, resp.Body, off); err != nil {
-		resp.Body.Close()
-		if errors.Is(err, io.EOF) {
-			return io.NopCloser(eofReader{}), nil
+	// Skip what is before off and limit to n locally (a no-op when the server got it right).
+	if skip := off - start; skip > 0 {
+		if _, err := io.CopyN(io.Discard, resp.Body, skip); err != nil {
+			resp.Body.Close()
+			if errors.Is(err, io.EOF) {
+				return io.NopCloser(eofReader{}), nil
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 	if n < 0 {
 		return resp.Body, nil
 	}
 	return &limited{io.LimitReader(resp.Body, n), resp.Body}, nil
+}
+
+// contentRangeStart parses "bytes 3-6/10".
+func contentRangeStart(v string) (int64, bool) {
+	v = strings.TrimSpace(strings.TrimPrefix(v, "bytes"))
+	dash := strings.IndexByte(v, '-')
+	if dash < 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v[:dash]), 10, 64)
+	return n, err == nil && n >= 0
 }
 
 func (f *FS) isFolder(ctx context.Context, p string) bool {
