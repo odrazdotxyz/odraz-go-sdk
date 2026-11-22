@@ -1,14 +1,20 @@
 package nextcloud_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 	"github.com/odrazdotxyz/odraz-go-sdk/accounts"
@@ -190,6 +196,15 @@ func TestValidate(t *testing.T) {
 // Real server: testenv/nextcloud/seed.sh, then
 //
 //	ODRAZ_TEST_NEXTCLOUD_URL=http://localhost:8082 go test ./vendors/nextcloud
+//
+// teamFolder is the team folder the real tests use: the testenv's "Team Docs", or ODRAZ_TEST_NEXTCLOUD_TEAM.
+func teamFolder() string {
+	if n := os.Getenv("ODRAZ_TEST_NEXTCLOUD_TEAM"); n != "" {
+		return n
+	}
+	return "Team Docs"
+}
+
 func realURL(t *testing.T) string {
 	u := os.Getenv("ODRAZ_TEST_NEXTCLOUD_URL")
 	if u == "" {
@@ -247,7 +262,7 @@ func TestRealReadOnlyEnforced(t *testing.T) {
 
 func TestConformanceReal(t *testing.T) {
 	url := realURL(t)
-	for name, id := range map[string]string{"personal": "personal", "team folder": "team:Team Docs"} {
+	for name, id := range map[string]string{"personal": "personal", "team folder": "team:" + teamFolder()} {
 		id := id
 		t.Run(name, func(t *testing.T) {
 			fstest.Run(t, func(t *testing.T) files.FS {
@@ -258,5 +273,125 @@ func TestConformanceReal(t *testing.T) {
 				return fs
 			})
 		})
+	}
+}
+
+// Nextcloud says per file whether a preview exists (nc:has-preview) and serves it by file id.
+func TestPreview(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/ocs/v2.php/cloud/user":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"ocs":{"data":{"id":"alice","displayname":"Alice"}}}`)
+		case r.URL.Path == "/index.php/core/preview":
+			gotQuery = r.URL.RawQuery
+			if r.URL.Query().Get("fileId") != "208" {
+				w.WriteHeader(404)
+				return
+			}
+			w.Header().Set("Content-Type", "image/png")
+			io.WriteString(w, "PNGDATA")
+		case r.Method == "PROPFIND":
+			props := map[string]string{
+				"/remote.php/dav/files/alice/pic.png":  `<resourcetype/><oc:fileid>208</oc:fileid><nc:has-preview>true</nc:has-preview>`,
+				"/remote.php/dav/files/alice/note.txt": `<resourcetype/><oc:fileid>210</oc:fileid><nc:has-preview>false</nc:has-preview>`,
+				"/remote.php/dav/files/alice/dir/":     `<resourcetype><collection/></resourcetype><oc:fileid>207</oc:fileid><nc:has-preview>false</nc:has-preview>`,
+				"/remote.php/dav/files/alice/dir":      `<resourcetype><collection/></resourcetype><oc:fileid>207</oc:fileid><nc:has-preview>false</nc:has-preview>`,
+			}
+			p, ok := props[r.URL.Path]
+			if !ok {
+				w.WriteHeader(404)
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(207)
+			fmt.Fprintf(w, `<multistatus xmlns="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><response><href>%s</href><propstat><prop>%s</prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>`, r.URL.Path, p)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	fs, err := openClient(t, srv.URL, "alice", "pw").OpenDrive(ctx, "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, ct, err := files.Preview(ctx, fs, "/pic.png", 64, 48)
+	if err != nil || ct != "image/png" {
+		t.Fatalf("Preview = %v %q", err, ct)
+	}
+	if b, _ := io.ReadAll(rc); string(b) != "PNGDATA" {
+		t.Errorf("body = %q", b)
+	}
+	rc.Close()
+	for _, w := range []string{"fileId=208", "x=64", "y=48", "forceIcon=0"} {
+		if !strings.Contains(gotQuery, w) {
+			t.Errorf("query %q lacks %q", gotQuery, w)
+		}
+	}
+	for path, want := range map[string]error{"/note.txt": odraz.ErrUnsupported, "/dir": odraz.ErrInvalidPath, "/missing.png": odraz.ErrNotFound} {
+		if _, _, err := files.Preview(ctx, fs, path, 64, 64); !errors.Is(err, want) {
+			t.Errorf("Preview(%s) = %v, want %v", path, err, want)
+		}
+	}
+}
+
+func TestRealPreview(t *testing.T) {
+	url := realURL(t)
+	fs, err := openClient(t, url, "alice", "alice-pass-123").OpenDrive(ctx, "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := fmt.Sprintf("/preview-test-%d", time.Now().UnixNano())
+	defer fs.Delete(ctx, dir, true)
+	img := image.NewRGBA(image.Rect(0, 0, 640, 400))
+	for y := 0; y < 400; y++ {
+		for x := 0; x < 640; x++ {
+			img.Set(x, y, color.RGBA{uint8(x), uint8(y), 128, 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Upload(ctx, fs, dir+"/pic.png", bytes.NewReader(buf.Bytes()), files.WriteOptions{Size: int64(buf.Len())}); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Upload(ctx, fs, dir+"/blob.bin", bytes.NewReader([]byte{0, 1, 2, 3, 0xff, 0xfe}), files.WriteOptions{Size: 6}); err != nil {
+		t.Fatal(err)
+	}
+	rc, ct, err := files.Preview(ctx, fs, dir+"/pic.png", 64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	data, _ := io.ReadAll(rc)
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || !strings.HasPrefix(ct, "image/") {
+		t.Fatalf("not an image: %v %q", err, ct)
+	}
+	if cfg.Width > 64 || cfg.Height > 64 || len(data) >= buf.Len() {
+		t.Errorf("thumbnail %dx%d, %d bytes (original %d bytes)", cfg.Width, cfg.Height, len(data), buf.Len())
+	}
+	if _, _, err := files.Preview(ctx, fs, dir+"/blob.bin", 64, 64); !errors.Is(err, odraz.ErrUnsupported) {
+		t.Errorf("binary file: %v, want ErrUnsupported", err)
+	}
+	if _, _, err := files.Preview(ctx, fs, dir, 64, 64); !errors.Is(err, odraz.ErrInvalidPath) {
+		t.Errorf("folder: %v, want ErrInvalidPath", err)
+	}
+	// The same call works inside a team folder, which has its own mount.
+	team, err := openClient(t, url, "alice", "alice-pass-123").OpenDrive(ctx, "team:"+teamFolder())
+	if err != nil {
+		t.Errorf("opening team folder %q: %v", teamFolder(), err)
+	} else {
+		defer team.Delete(ctx, dir, true)
+		if err := files.Upload(ctx, team, dir+"/pic.png", bytes.NewReader(buf.Bytes()), files.WriteOptions{Size: int64(buf.Len())}); err != nil {
+			t.Fatal(err)
+		}
+		if rc, _, err := files.Preview(ctx, team, dir+"/pic.png", 64, 64); err != nil {
+			t.Errorf("preview in a team folder: %v", err)
+		} else {
+			rc.Close()
+		}
 	}
 }

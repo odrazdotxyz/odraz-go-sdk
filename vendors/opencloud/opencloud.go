@@ -9,9 +9,13 @@ package opencloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 
 	odraz "github.com/odrazdotxyz/odraz-go-sdk"
@@ -219,7 +223,7 @@ func (c *client) OpenDrive(ctx context.Context, id string) (files.FS, error) {
 	if err != nil {
 		return nil, err
 	}
-	fs := files.Wrap(&davfs.FS{C: d})
+	fs := files.Wrap(&previewFS{&davfs.FS{C: d}})
 	if c.readOnly(id) {
 		fs = files.ReadOnly(fs)
 	}
@@ -248,4 +252,32 @@ func (c *client) spaceURL(apiURL string) (string, error) {
 	}
 	su.Path, su.RawPath, su.RawQuery, su.Fragment = au.Path, "", "", ""
 	return su.String(), nil
+}
+
+// previewFS adds server-rendered thumbnails (files.Previewer) to a space's FS. OpenCloud's thumbnail service
+// answers a normal WebDAV GET that carries ?preview=1 and a size, caches the result by the file's etag, and
+// answers 404 for a file type it cannot render (a text file, say).
+type previewFS struct{ *davfs.FS }
+
+func (f *previewFS) Preview(ctx context.Context, p string, width, height int) (io.ReadCloser, string, error) {
+	q := url.Values{"preview": {"1"}, "x": {strconv.Itoa(width)}, "y": {strconv.Itoa(height)}, "a": {"1"}, "scalingup": {"0"}}
+	resp, err := f.C.Do(ctx, dav.Request{Method: "GET", URL: f.C.URL(p) + "?" + q.Encode()})
+	if err != nil {
+		if errors.Is(err, odraz.ErrNotFound) {
+			// Missing file, or a file the service cannot render: tell them apart.
+			if st, serr := f.Stat(ctx, p); serr == nil {
+				if st.IsDir {
+					return nil, "", fmt.Errorf("opencloud: %s is a folder: %w", p, odraz.ErrInvalidPath)
+				}
+				return nil, "", fmt.Errorf("opencloud: no preview for %s: %w", p, odraz.ErrUnsupported)
+			}
+		}
+		return nil, "", err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		resp.Body.Close()
+		return nil, "", fmt.Errorf("opencloud: no preview for %s (server answered %q): %w", p, ct, odraz.ErrUnsupported)
+	}
+	return resp.Body, ct, nil
 }

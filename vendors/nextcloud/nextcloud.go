@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -241,9 +243,48 @@ func (c *client) OpenDrive(ctx context.Context, driveID string) (files.FS, error
 	if err != nil {
 		return nil, err
 	}
-	fs := files.Wrap(&davfs.FS{C: d})
+	fs := files.Wrap(&previewFS{FS: &davfs.FS{C: d}, api: c.api})
 	if ro {
 		fs = files.ReadOnly(fs)
 	}
 	return fs, nil
+}
+
+// previewFS adds server-rendered thumbnails (files.Previewer). Nextcloud says per file whether it can render
+// one (PROPFIND nc:has-preview) and serves it from /index.php/core/preview by file id.
+type previewFS struct {
+	*davfs.FS
+	api *dav.Client // the server root, not the user's files
+}
+
+func (f *previewFS) Preview(ctx context.Context, p string, width, height int) (io.ReadCloser, string, error) {
+	rs, err := f.C.Propfind(ctx, p, 0)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(rs) == 0 {
+		return nil, "", fmt.Errorf("nextcloud: %s: %w", p, odraz.ErrNotFound)
+	}
+	r := rs[0]
+	switch {
+	case r.IsDir:
+		return nil, "", fmt.Errorf("nextcloud: %s is a folder: %w", p, odraz.ErrInvalidPath)
+	case !r.HasPreview || r.FileID == "":
+		return nil, "", fmt.Errorf("nextcloud: no preview for %s: %w", p, odraz.ErrUnsupported)
+	}
+	// forceIcon=0: answer 404 instead of a generic file-type icon when there is nothing to render.
+	q := url.Values{"fileId": {r.FileID}, "x": {strconv.Itoa(width)}, "y": {strconv.Itoa(height)}, "a": {"true"}, "forceIcon": {"0"}}
+	resp, err := f.api.Do(ctx, dav.Request{Method: "GET", URL: f.api.URL("/index.php/core/preview") + "?" + q.Encode()})
+	if err != nil {
+		if dav.Status(err) == http.StatusNotFound {
+			return nil, "", fmt.Errorf("nextcloud: no preview for %s: %w", p, odraz.ErrUnsupported)
+		}
+		return nil, "", err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		resp.Body.Close()
+		return nil, "", fmt.Errorf("nextcloud: no preview for %s (server answered %q): %w", p, ct, odraz.ErrUnsupported)
+	}
+	return resp.Body, ct, nil
 }

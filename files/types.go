@@ -87,8 +87,8 @@ type Client interface {
 	OpenDrive(ctx context.Context, driveID string) (FS, error)
 }
 
-// Optional interfaces, detected by type assertion on FS. Reserved names;
-// not implemented in v1.
+// Optional interfaces, detected by type assertion on FS. Copier and
+// Previewer are implemented by some adapters; EditorOpener is reserved.
 type (
 	// Copier is implemented by backends with a native copy (WebDAV COPY).
 	// Use the Copy helper, which validates arguments and falls back to
@@ -96,7 +96,10 @@ type (
 	Copier interface {
 		Copy(ctx context.Context, from, to string, overwrite bool) error
 	}
-	// Previewer returns a thumbnail/preview image.
+	// Previewer returns a thumbnail/preview image rendered by the server: the
+	// body, its content type (an image/* type) and an error. Use the Preview
+	// helper, which validates the size and returns ErrUnsupported when the FS
+	// (or the file type) has no preview.
 	Previewer interface {
 		Preview(ctx context.Context, path string, width, height int) (io.ReadCloser, string, error)
 	}

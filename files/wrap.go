@@ -10,11 +10,18 @@ import (
 
 // Wrap returns an FS that normalizes every path with CleanPath before
 // calling inner, so adapters never see unclean or root-escaping paths.
-// Optional interfaces of inner (currently Copier) are preserved.
+// Optional interfaces of inner (Copier, Previewer) are preserved.
 func Wrap(inner FS) FS {
 	c := &cleanFS{inner}
-	if cp, ok := inner.(Copier); ok {
+	cp, hasCp := inner.(Copier)
+	pv, hasPv := inner.(Previewer)
+	switch {
+	case hasCp && hasPv:
+		return &cleanCopierPreviewerFS{&cleanCopierFS{c, cp}, &cleanPreviewerFS{c, pv}}
+	case hasCp:
 		return &cleanCopierFS{c, cp}
+	case hasPv:
+		return &cleanPreviewerFS{c, pv}
 	}
 	return c
 }
@@ -34,6 +41,28 @@ func (c *cleanCopierFS) Copy(ctx context.Context, from, to string, ow bool) erro
 		return err
 	}
 	return c.cp.Copy(ctx, from, to, ow)
+}
+
+type cleanPreviewerFS struct {
+	*cleanFS
+	pv Previewer
+}
+
+func (c *cleanPreviewerFS) Preview(ctx context.Context, p string, w, h int) (io.ReadCloser, string, error) {
+	p, err := CleanPath(p)
+	if err != nil {
+		return nil, "", err
+	}
+	return c.pv.Preview(ctx, p, w, h)
+}
+
+type cleanCopierPreviewerFS struct {
+	*cleanCopierFS
+	pvfs *cleanPreviewerFS
+}
+
+func (c *cleanCopierPreviewerFS) Preview(ctx context.Context, p string, w, h int) (io.ReadCloser, string, error) {
+	return c.pvfs.Preview(ctx, p, w, h)
 }
 
 type cleanFS struct{ in FS }
@@ -102,8 +131,24 @@ func (c *cleanFS) Capabilities() Capabilities { return c.in.Capabilities() }
 
 // ReadOnly returns an FS that serves reads from inner and rejects every
 // mutation with an error matching odraz.ErrPermission. Capabilities report
-// ReadOnly. Optional write interfaces (Copier) are not exposed.
-func ReadOnly(inner FS) FS { return &readOnlyFS{inner} }
+// ReadOnly. Optional write interfaces (Copier) are not exposed; read-only
+// ones (Previewer) are kept.
+func ReadOnly(inner FS) FS {
+	ro := &readOnlyFS{inner}
+	if pv, ok := inner.(Previewer); ok {
+		return &readOnlyPreviewerFS{ro, pv}
+	}
+	return ro
+}
+
+type readOnlyPreviewerFS struct {
+	*readOnlyFS
+	pv Previewer
+}
+
+func (r *readOnlyPreviewerFS) Preview(ctx context.Context, p string, w, h int) (io.ReadCloser, string, error) {
+	return r.pv.Preview(ctx, p, w, h)
+}
 
 type readOnlyFS struct{ FS }
 

@@ -28,12 +28,14 @@ type Resource struct {
 	QuotaAvailable int64  // -1 if not reported
 	MountType      string // Nextcloud nc:mount-type: "group" for a team folder, "shared", "external"; empty if absent
 	Permissions    string // ownCloud/Nextcloud oc:permissions flags (e.g. "RMGDNVCK"); empty if absent
+	FileID         string // oc:fileid: Nextcloud's numeric id, OpenCloud's composite one; empty if absent
+	HasPreview     bool   // Nextcloud nc:has-preview: the server can render a thumbnail
 }
 
 const propfindBody = `<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><d:prop>
 <d:resourcetype/><d:getcontentlength/><d:getlastmodified/><d:getetag/><d:getcontenttype/><d:displayname/>
-<d:quota-used-bytes/><d:quota-available-bytes/><nc:mount-type/><oc:permissions/>
+<d:quota-used-bytes/><d:quota-available-bytes/><nc:mount-type/><oc:permissions/><oc:fileid/><nc:has-preview/>
 </d:prop></d:propfind>`
 
 // Propfind runs PROPFIND with Depth 0 or 1 on a path relative to the base.
@@ -93,6 +95,8 @@ type xmlMultistatus struct {
 				QuotaAvailable string `xml:"quota-available-bytes"`
 				MountType      string `xml:"mount-type"`
 				Permissions    string `xml:"permissions"`
+				FileID         string `xml:"fileid"`
+				HasPreview     string `xml:"has-preview"`
 			} `xml:"prop"`
 		} `xml:"propstat"`
 	} `xml:"response"`
@@ -142,6 +146,8 @@ func ParseMultistatus(data []byte, basePath string) ([]Resource, error) {
 			}
 			res.MountType = firstNonEmpty(res.MountType, strings.TrimSpace(pr.MountType))
 			res.Permissions = firstNonEmpty(res.Permissions, strings.TrimSpace(pr.Permissions))
+			res.FileID = firstNonEmpty(res.FileID, strings.TrimSpace(pr.FileID))
+			res.HasPreview = res.HasPreview || strings.EqualFold(strings.TrimSpace(pr.HasPreview), "true")
 			if n, err := strconv.ParseInt(strings.TrimSpace(pr.QuotaUsed), 10, 64); err == nil {
 				res.QuotaUsed = n
 			}

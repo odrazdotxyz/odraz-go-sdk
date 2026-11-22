@@ -1,10 +1,14 @@
 package opencloud_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -366,5 +370,124 @@ func TestOIDCMethodDeclared(t *testing.T) {
 	}
 	if strings.Join(kinds, ",") != "oidc:browser,app-token:form" {
 		t.Errorf("auth methods = %v", kinds)
+	}
+}
+
+// OpenCloud renders thumbnails for a WebDAV GET that carries ?preview=1 and a size, and answers 404 for a file
+// type it cannot render.
+func TestPreview(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/graph/v1.0/me/drives":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"value":[{"id":"p1","name":"Me","driveType":"personal","root":{"webDavUrl":"https://public.example/dav/spaces/p1"}}]}`)
+		case r.Method == "GET" && r.URL.Path == "/dav/spaces/p1/pic.png" && r.URL.Query().Get("preview") == "1":
+			gotQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "image/png")
+			io.WriteString(w, "PNGDATA")
+		case r.Method == "GET" && r.URL.Path == "/dav/spaces/p1/odd.bin":
+			w.Header().Set("Content-Type", "application/octet-stream") // a server that ignores ?preview and sends the file
+			io.WriteString(w, "raw")
+		case r.Method == "GET" && r.URL.Query().Get("preview") == "1":
+			w.WriteHeader(404) // no preview for text, a folder, or a missing path
+		case r.Method == "PROPFIND":
+			res := map[string]string{
+				"/dav/spaces/p1/note.txt": `<resourcetype/>`, "/dav/spaces/p1/odd.bin": `<resourcetype/>`,
+				"/dav/spaces/p1/dir/": `<resourcetype><collection/></resourcetype>`, "/dav/spaces/p1/dir": `<resourcetype><collection/></resourcetype>`,
+			}
+			rt, ok := res[r.URL.Path]
+			if !ok {
+				w.WriteHeader(404)
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(207)
+			fmt.Fprintf(w, `<multistatus xmlns="DAV:"><response><href>%s</href><propstat><prop>%s</prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>`, r.URL.Path, rt)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	fs, err := openClient(t, srv.URL, "u", "tok", nil).OpenDrive(ctx, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, ct, err := files.Preview(ctx, fs, "/pic.png", 64, 48)
+	if err != nil || ct != "image/png" {
+		t.Fatalf("Preview = %v %q", err, ct)
+	}
+	if b, _ := io.ReadAll(rc); string(b) != "PNGDATA" {
+		t.Errorf("body = %q", b)
+	}
+	rc.Close()
+	for _, w := range []string{"preview=1", "x=64", "y=48", "scalingup=0"} {
+		if !strings.Contains(gotQuery, w) {
+			t.Errorf("query %q lacks %q", gotQuery, w)
+		}
+	}
+	for path, want := range map[string]error{"/note.txt": odraz.ErrUnsupported, "/odd.bin": odraz.ErrUnsupported, "/dir": odraz.ErrInvalidPath, "/missing.png": odraz.ErrNotFound} {
+		if _, _, err := files.Preview(ctx, fs, path, 64, 64); !errors.Is(err, want) {
+			t.Errorf("Preview(%s) = %v, want %v", path, err, want)
+		}
+	}
+	// A read-only drive still serves thumbnails.
+	if _, ok := files.ReadOnly(fs).(files.Previewer); !ok {
+		t.Error("ReadOnly lost the Previewer")
+	}
+}
+
+// Real server: needs ODRAZ_TEST_OPENCLOUD_* as for the other real tests. Uploads a generated PNG, asks for a
+// small thumbnail, and checks it is a real, smaller PNG; a binary file has none (text files do get one).
+func TestRealPreview(t *testing.T) {
+	url, user, token := realEnv(t)
+	cl := openClient(t, url, user, token, insecure)
+	ds, err := cl.Drives(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var personal string
+	for _, d := range ds {
+		if d.Kind == files.DrivePersonal {
+			personal = d.ID
+		}
+	}
+	fs, err := cl.OpenDrive(ctx, personal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := fmt.Sprintf("/preview-test-%d", time.Now().UnixNano())
+	defer fs.Delete(ctx, dir, true)
+	img := image.NewRGBA(image.Rect(0, 0, 640, 400))
+	for y := 0; y < 400; y++ {
+		for x := 0; x < 640; x++ {
+			img.Set(x, y, color.RGBA{uint8(x), uint8(y), 128, 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Upload(ctx, fs, dir+"/pic.png", bytes.NewReader(buf.Bytes()), files.WriteOptions{Size: int64(buf.Len())}); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Upload(ctx, fs, dir+"/blob.bin", bytes.NewReader([]byte{0, 1, 2, 3, 0xff, 0xfe}), files.WriteOptions{Size: 6}); err != nil {
+		t.Fatal(err)
+	}
+	rc, ct, err := files.Preview(ctx, fs, dir+"/pic.png", 64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	data, _ := io.ReadAll(rc)
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || !strings.HasPrefix(ct, "image/") {
+		t.Fatalf("not an image: %v %q", err, ct)
+	}
+	if cfg.Width > 64 || cfg.Height > 64 || len(data) >= buf.Len() {
+		t.Errorf("thumbnail %dx%d, %d bytes (original %d bytes)", cfg.Width, cfg.Height, len(data), buf.Len())
+	}
+	if _, _, err := files.Preview(ctx, fs, dir+"/blob.bin", 64, 64); !errors.Is(err, odraz.ErrUnsupported) {
+		t.Errorf("binary file: %v, want ErrUnsupported", err)
 	}
 }

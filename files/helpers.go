@@ -269,3 +269,23 @@ func copyTree(ctx context.Context, fs FS, src Entry, to string) error {
 	}
 	return nil
 }
+
+// MaxPreviewSize is the largest width or height Preview accepts.
+const MaxPreviewSize = 2048
+
+// Preview returns a server-rendered thumbnail of the file at path, at most
+// width x height pixels, with its content type (image/*). It returns an error
+// matching odraz.ErrUnsupported when the backend cannot render one (no
+// preview support, or no preview for this file type), ErrNotFound when the
+// path does not exist and ErrInvalidPath for a folder or a bad size. Callers
+// can then fall back to reading the original. The caller closes the body.
+func Preview(ctx context.Context, fs FS, path string, width, height int) (io.ReadCloser, string, error) {
+	if width <= 0 || height <= 0 || width > MaxPreviewSize || height > MaxPreviewSize {
+		return nil, "", fmt.Errorf("files: preview size %dx%d must be between 1 and %d: %w", width, height, MaxPreviewSize, odraz.ErrInvalidPath)
+	}
+	pv, ok := fs.(Previewer)
+	if !ok {
+		return nil, "", fmt.Errorf("files: this backend has no thumbnails: %w", odraz.ErrUnsupported)
+	}
+	return pv.Preview(ctx, path, width, height)
+}

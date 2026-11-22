@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,3 +196,65 @@ func TestReadOnly(t *testing.T) {
 		t.Error("source must be untouched")
 	}
 }
+
+// previewFS is a minimal FS with the optional Previewer.
+type previewFS struct {
+	files.FS
+	gotW, gotH int
+}
+
+func (p *previewFS) Preview(_ context.Context, path string, w, h int) (io.ReadCloser, string, error) {
+	p.gotW, p.gotH = w, h
+	return io.NopCloser(strings.NewReader("png:" + path)), "image/png", nil
+}
+
+func TestPreviewHelper(t *testing.T) {
+	for _, c := range []struct{ w, h int }{{0, 10}, {10, 0}, {-1, 5}, {files.MaxPreviewSize + 1, 10}} {
+		if _, _, err := files.Preview(ctx, &previewFS{}, "/a.png", c.w, c.h); !errors.Is(err, odraz.ErrInvalidPath) {
+			t.Errorf("Preview(%dx%d) = %v, want ErrInvalidPath", c.w, c.h, err)
+		}
+	}
+	if _, _, err := files.Preview(ctx, memfs.New(), "/a.png", 64, 64); !errors.Is(err, odraz.ErrUnsupported) {
+		t.Errorf("FS without Previewer: %v, want ErrUnsupported", err)
+	}
+	pf := &previewFS{}
+	rc, ct, err := files.Preview(ctx, pf, "/a.png", 64, 48)
+	if err != nil || ct != "image/png" || pf.gotW != 64 || pf.gotH != 48 {
+		t.Fatalf("Preview = %v %q %dx%d", err, ct, pf.gotW, pf.gotH)
+	}
+	rc.Close()
+}
+
+// Wrap and ReadOnly must not hide a Previewer; Wrap cleans the path first.
+func TestWrapperKeepsPreviewer(t *testing.T) {
+	inner := &previewFS{}
+	for name, fs := range map[string]files.FS{"wrap": files.Wrap(inner), "readonly": files.ReadOnly(inner), "readonly+wrap": files.ReadOnly(files.Wrap(inner))} {
+		if _, ok := fs.(files.Previewer); !ok {
+			t.Errorf("%s: lost the Previewer", name)
+			continue
+		}
+		rc, _, err := files.Preview(ctx, fs, "/a/../b.png", 10, 10)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		b, _ := io.ReadAll(rc)
+		if name != "readonly" && string(b) != "png:/b.png" {
+			t.Errorf("%s: path = %q, want the cleaned %q", name, b, "png:/b.png")
+		}
+	}
+	if _, ok := files.Wrap(memfs.New()).(files.Previewer); ok {
+		t.Error("an FS without a preview must not gain one")
+	}
+	// The same FS with both optional interfaces keeps both.
+	if _, ok := files.Wrap(&copyPreviewFS{}).(files.Copier); !ok {
+		t.Error("Wrap lost the Copier when the FS also has a Previewer")
+	}
+	if _, ok := files.Wrap(&copyPreviewFS{}).(files.Previewer); !ok {
+		t.Error("Wrap lost the Previewer when the FS also has a Copier")
+	}
+}
+
+type copyPreviewFS struct{ previewFS }
+
+func (*copyPreviewFS) Copy(context.Context, string, string, bool) error { return nil }
