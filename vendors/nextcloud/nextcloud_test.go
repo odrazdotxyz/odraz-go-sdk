@@ -395,3 +395,62 @@ func TestRealPreview(t *testing.T) {
 		}
 	}
 }
+
+func TestAvatar(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, p, _ := r.BasicAuth(); p != "pw" {
+			w.WriteHeader(401)
+			return
+		}
+		switch {
+		case r.URL.Path == "/ocs/v2.php/cloud/user":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"ocs":{"data":{"id":"a.li@ce","displayname":"Alice"}}}`)
+		case strings.HasPrefix(r.URL.Path, "/index.php/avatar/"):
+			gotPath = r.URL.EscapedPath()
+			w.Header().Set("Content-Type", "image/png")
+			io.WriteString(w, "PNGDATA")
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	st := accounts.NewMemoryStore()
+	st.Put(ctx, "nc", accounts.SecretPassword, []byte("pw"))
+	h, err := accounts.Open(ctx, account(srv.URL, "alice"), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, ct, err := h.Avatar(ctx, 96)
+	if err != nil || ct != "image/png" {
+		t.Fatalf("Avatar = %v %q", err, ct)
+	}
+	defer rc.Close()
+	if b, _ := io.ReadAll(rc); string(b) != "PNGDATA" {
+		t.Errorf("body = %q", b)
+	}
+	// The user id (not the login name) goes in the path, escaped once, with the size.
+	if want := "/index.php/avatar/a.li@ce/96"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+}
+
+func TestRealAvatar(t *testing.T) {
+	url := realURL(t)
+	st := accounts.NewMemoryStore()
+	st.Put(ctx, "nc", accounts.SecretPassword, []byte("alice-pass-123"))
+	h, err := accounts.Open(ctx, account(url, "alice"), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, ct, err := h.Avatar(ctx, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	b, _ := io.ReadAll(rc)
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(b)); err != nil || !strings.HasPrefix(ct, "image/") || cfg.Width == 0 {
+		t.Errorf("not an image: %q %v", ct, err)
+	}
+}

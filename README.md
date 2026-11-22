@@ -106,6 +106,9 @@ Other behaviour worth knowing:
 - Reads at or past the end of a file return no data on every backend.
 - Uploads are a single PUT. TUS (resumable uploads) is planned.
 - OpenCloud quota with `total: 0` means unlimited and is reported as `Quota.Total == -1`.
+- **Avatars** (`Handle.Avatar`, the optional `Adapter.Avatar`): the signed-in user's profile picture. Nextcloud always
+  has one (it generates an initials picture); OpenCloud has one only if the user uploaded a photo and answers
+  `ErrNotFound` otherwise, so show your own placeholder (the vendor's icon).
 - **Thumbnails** (`files.Preview`, the optional `files.Previewer`): OpenCloud and Nextcloud render them on the server
   and the adapters fetch them (OpenCloud: WebDAV GET with `?preview=1`; Nextcloud: `core/preview` by file id). A
   backend or file type without one gives `ErrUnsupported`; fall back to reading the original. Which types get one is

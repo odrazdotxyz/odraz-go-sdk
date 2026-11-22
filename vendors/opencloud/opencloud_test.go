@@ -496,3 +496,73 @@ func TestRealPreview(t *testing.T) {
 		t.Errorf("folder: %v, want ErrInvalidPath", err)
 	}
 }
+
+func TestAvatar(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "":
+			w.WriteHeader(401)
+			return
+		}
+		user, _, _ := r.BasicAuth()
+		switch {
+		case r.URL.Path == "/graph/v1.0/me/photo/$value" && user == "withphoto":
+			w.Header().Set("Content-Type", "image/jpeg")
+			io.WriteString(w, "JPEGDATA")
+		case r.URL.Path == "/graph/v1.0/me/photo/$value" && user == "html":
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, "<html>login</html>")
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(404) // what real OpenCloud answers for a user without a photo
+			io.WriteString(w, `{"error":{"code":"generalException","message":"failed to get photo"}}`)
+		}
+	}))
+	defer srv.Close()
+	avatar := func(user string) (string, string, error) {
+		st := accounts.NewMemoryStore()
+		st.Put(ctx, "oc", accounts.SecretPassword, []byte("tok"))
+		h, err := accounts.Open(ctx, accounts.Account{ID: "oc", Adapter: "opencloud", Config: map[string]string{"url": srv.URL, "username": user}}, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc, ct, err := h.Avatar(ctx, 64)
+		if err != nil {
+			return "", "", err
+		}
+		defer rc.Close()
+		b, _ := io.ReadAll(rc)
+		return string(b), ct, nil
+	}
+	if b, ct, err := avatar("withphoto"); err != nil || b != "JPEGDATA" || ct != "image/jpeg" {
+		t.Errorf("with a photo: %q %q %v", b, ct, err)
+	}
+	if _, _, err := avatar("nophoto"); !errors.Is(err, odraz.ErrNotFound) {
+		t.Errorf("without a photo: %v, want ErrNotFound", err)
+	}
+	if _, _, err := avatar("html"); !errors.Is(err, odraz.ErrNotFound) {
+		t.Errorf("a non-image answer: %v, want ErrNotFound", err)
+	}
+}
+
+// Real server: most users have no photo, so either an image or ErrNotFound is right.
+func TestRealAvatar(t *testing.T) {
+	url, user, token := realEnv(t)
+	st := accounts.NewMemoryStore()
+	st.Put(ctx, "oc", accounts.SecretPassword, []byte(token))
+	h, err := accounts.Open(ctx, accounts.Account{ID: "oc", Adapter: "opencloud", Config: map[string]string{"url": url, "username": user, accounts.ConfigInsecure: "true"}}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, ct, err := h.Avatar(ctx, 64)
+	if errors.Is(err, odraz.ErrNotFound) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if b, _ := io.ReadAll(rc); !strings.HasPrefix(ct, "image/") || len(b) == 0 {
+		t.Errorf("avatar: %q, %d bytes", ct, len(b))
+	}
+}

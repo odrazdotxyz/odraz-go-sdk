@@ -51,3 +51,4 @@ eval "$(testenv/opencloud/seed.sh)"   # fresh instance + app token; exports ODRA
   4. `GET /signin/v1/identifier/_/authorize?<original params>&konnect=<state from step 3, or from step 2>`
      -> `302` to the redirect URI with `code` and `state`
 | Thumbnails | WebDAV `GET <file>?preview=1&x=64&y=64&a=1&scalingup=0` returns a PNG (9.9 KB for a 677 KB image, 64x64 crop); `404` for a type it cannot render (`.md` and `.bin` had none, `.txt` did); folders 404 |
+| Avatar | `GET /graph/v1.0/me/photo/$value` is `404` `failed to get photo` for a user without a photo (the demo users); `/graph/v1.0/me` has `displayName` |

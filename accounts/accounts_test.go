@@ -3,6 +3,8 @@ package accounts
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,5 +53,39 @@ func TestEnvProvider(t *testing.T) {
 	t.Setenv("ODRAZTEST_TOKEN", "t")
 	if c, _ := p.Credentials(ctx); c.Kind != CredBearer || c.AccessToken != "t" {
 		t.Fatalf("got %+v", c)
+	}
+}
+
+func TestAvatarCapability(t *testing.T) {
+	ctx := context.Background()
+	var gotSize int
+	Register(Adapter{Name: "avatar-yes", Avatar: func(_ context.Context, _ *Env, size int) (io.ReadCloser, string, error) {
+		gotSize = size
+		return io.NopCloser(strings.NewReader("img")), "image/png", nil
+	}})
+	Register(Adapter{Name: "avatar-no"})
+	open := func(name string) *Handle {
+		h, err := Open(ctx, Account{ID: "x", Adapter: name}, NewMemoryStore())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	if _, _, err := open("avatar-no").Avatar(ctx, 64); !errors.Is(err, odraz.ErrUnsupported) {
+		t.Errorf("adapter without avatars: %v, want ErrUnsupported", err)
+	}
+	h := open("avatar-yes")
+	for _, c := range []struct{ in, want int }{{0, 64}, {1, 1}, {128, 128}, {MaxAvatarSize, MaxAvatarSize}} {
+		rc, ct, err := h.Avatar(ctx, c.in)
+		if err != nil || ct != "image/png" || gotSize != c.want {
+			t.Errorf("Avatar(%d) = %v %q, adapter saw size %d, want %d", c.in, err, ct, gotSize, c.want)
+			continue
+		}
+		rc.Close()
+	}
+	for _, bad := range []int{-1, MaxAvatarSize + 1} {
+		if _, _, err := h.Avatar(ctx, bad); !errors.Is(err, odraz.ErrInvalidPath) {
+			t.Errorf("Avatar(%d) = %v, want ErrInvalidPath", bad, err)
+		}
 	}
 }

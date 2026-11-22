@@ -59,6 +59,7 @@ func init() {
 		Domains:  map[accounts.Domain]any{files.Domain: files.Factory(newClient)},
 		Validate: validate,
 		Refresh:  refresher,
+		Avatar:   avatar,
 	})
 }
 
@@ -278,6 +279,28 @@ func (f *previewFS) Preview(ctx context.Context, p string, width, height int) (i
 	if !strings.HasPrefix(ct, "image/") {
 		resp.Body.Close()
 		return nil, "", fmt.Errorf("opencloud: no preview for %s (server answered %q): %w", p, ct, odraz.ErrUnsupported)
+	}
+	return resp.Body, ct, nil
+}
+
+// avatar returns the user's profile photo from the Graph API (GET /me/photo/$value). Most users have none,
+// and the server then answers 404: that is ErrNotFound. The size is ignored: the original photo is returned.
+func avatar(ctx context.Context, env *accounts.Env, _ int) (io.ReadCloser, string, error) {
+	c, err := serverClient(env)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := c.Do(ctx, dav.Request{Method: "GET", Path: "/graph/v1.0/me/photo/$value"})
+	if err != nil {
+		if errors.Is(err, odraz.ErrNotFound) {
+			return nil, "", fmt.Errorf("opencloud: this user has no profile photo: %w", odraz.ErrNotFound)
+		}
+		return nil, "", err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		resp.Body.Close()
+		return nil, "", fmt.Errorf("opencloud: the profile photo answer was %q, not an image: %w", ct, odraz.ErrNotFound)
 	}
 	return resp.Body, ct, nil
 }

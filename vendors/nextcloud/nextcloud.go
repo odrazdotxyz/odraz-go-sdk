@@ -56,6 +56,7 @@ func init() {
 		Fields:   append([]accounts.Field{{Name: "url", Label: "Server URL", Type: accounts.FieldURL, Required: true}}, accounts.ProxyFields...),
 		Domains:  map[accounts.Domain]any{files.Domain: files.Factory(newClient)},
 		Validate: validate,
+		Avatar:   avatar,
 	})
 }
 
@@ -285,6 +286,29 @@ func (f *previewFS) Preview(ctx context.Context, p string, width, height int) (i
 	if !strings.HasPrefix(ct, "image/") {
 		resp.Body.Close()
 		return nil, "", fmt.Errorf("nextcloud: no preview for %s (server answered %q): %w", p, ct, odraz.ErrUnsupported)
+	}
+	return resp.Body, ct, nil
+}
+
+// avatar returns the user's avatar from /index.php/avatar/<user>/<size>. Nextcloud generates a picture with the
+// user's initials when no photo was uploaded, so there is nearly always one.
+func avatar(ctx context.Context, env *accounts.Env, size int) (io.ReadCloser, string, error) {
+	c, err := serverClient(env)
+	if err != nil {
+		return nil, "", err
+	}
+	id, _, err := whoami(ctx, c, env.Account.Config["url"])
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := c.Do(ctx, dav.Request{Method: "GET", Path: "/index.php/avatar/" + url.PathEscape(id) + "/" + strconv.Itoa(size)})
+	if err != nil {
+		return nil, "", err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		resp.Body.Close()
+		return nil, "", fmt.Errorf("nextcloud: the avatar answer was %q, not an image: %w", ct, odraz.ErrNotFound)
 	}
 	return resp.Body, ct, nil
 }

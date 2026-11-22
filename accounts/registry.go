@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 
@@ -30,6 +31,9 @@ type Adapter struct {
 	// Validate checks that the account works (reachable, credentials ok) and
 	// returns ErrAuth, ErrNotFound or ErrBlockedByProxy with a clear message.
 	Validate func(ctx context.Context, env *Env) error
+	// Avatar, if set, returns the signed-in user's profile picture: the image, its content type (image/*) and an
+	// error. ErrNotFound means the user has none. size is a hint in pixels.
+	Avatar func(ctx context.Context, env *Env, size int) (io.ReadCloser, string, error)
 }
 
 var (
@@ -146,4 +150,24 @@ func Validate(ctx context.Context, acc Account, store SecretStore) error {
 // ErrBadFactory reports an adapter that registered a wrong factory type.
 func ErrBadFactory(d Domain, got any) error {
 	return fmt.Errorf("accounts: factory for %s has unexpected type %T", d, got)
+}
+
+// MaxAvatarSize is the largest size Avatar accepts.
+const MaxAvatarSize = 512
+
+// Avatar returns the account user's profile picture (see Adapter.Avatar), about size x size pixels (0 means
+// 64). It returns an error matching odraz.ErrUnsupported when the adapter has no avatars and ErrNotFound when
+// this user has none: callers then show their own placeholder, such as the vendor's icon. The caller closes
+// the body.
+func (h *Handle) Avatar(ctx context.Context, size int) (io.ReadCloser, string, error) {
+	if h.adapter.Avatar == nil {
+		return nil, "", fmt.Errorf("accounts: adapter %q has no avatars: %w", h.adapter.Name, odraz.ErrUnsupported)
+	}
+	if size == 0 {
+		size = 64
+	}
+	if size < 0 || size > MaxAvatarSize {
+		return nil, "", fmt.Errorf("accounts: avatar size %d must be between 1 and %d: %w", size, MaxAvatarSize, odraz.ErrInvalidPath)
+	}
+	return h.adapter.Avatar(ctx, h.Env, size)
 }
