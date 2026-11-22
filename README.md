@@ -109,7 +109,7 @@ Other behaviour worth knowing:
 - **Thumbnails** (`files.Preview`, the optional `files.Previewer`): OpenCloud and Nextcloud render them on the server
   and the adapters fetch them (OpenCloud: WebDAV GET with `?preview=1`; Nextcloud: `core/preview` by file id). A
   backend or file type without one gives `ErrUnsupported`; fall back to reading the original. Which types get one is
-  the server's decision (both render images and text files; video needs ffmpeg on Nextcloud). Plain WebDAV has none.
+  the server's decision (both render images and text files; video needs ffmpeg on Nextcloud). Plain WebDAV has none. The size is a hint: servers keep the aspect ratio and may round up to a cached size.
 - Nextcloud: the personal drive is the user's files. Each **Team folder** (Group folders app) the user can see
   is also reported as a `DriveProject` drive with its own quota, and `ReadOnly` when the user has no write
   permission. It still appears as a normal folder inside the personal drive, as in Nextcloud's own UI. Quota

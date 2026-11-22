@@ -273,8 +273,10 @@ func copyTree(ctx context.Context, fs FS, src Entry, to string) error {
 // MaxPreviewSize is the largest width or height Preview accepts.
 const MaxPreviewSize = 2048
 
-// Preview returns a server-rendered thumbnail of the file at path, at most
-// width x height pixels, with its content type (image/*). It returns an error
+// Preview returns a server-rendered thumbnail of the file at path, about
+// width x height pixels (the aspect ratio is kept, and a server may round the
+// size to one it has cached: Nextcloud answered a request for 128 with a 256
+// wide image), with its content type (image/*). It returns an error
 // matching odraz.ErrUnsupported when the backend cannot render one (no
 // preview support, or no preview for this file type), ErrNotFound when the
 // path does not exist and ErrInvalidPath for a folder or a bad size. Callers
