@@ -24,20 +24,38 @@
 // Writing: Mkdir creates a zero-byte marker object "<key>/" for the folder and
 // every missing parent. Write needs an existing parent (a marker or any key
 // below it; the root always exists) and, without Overwrite, fails with
-// ErrExists; where the server honours "If-None-Match: *" (probed once per
-// drive) the put itself is conditional, otherwise a concurrent writer can
-// still be overwritten. Uploads stream: a source of unknown size goes up in
-// 8 MiB parts. Delete removes the keys under a folder in batches of 1,000.
-// Move is a server-side copy followed by a delete, so it is not atomic and a
-// failure half way can leave both copies; a folder is copied key by key.
+// ErrExists after a Stat. Where the server honours "If-None-Match: *" (probed
+// once per drive) a single-PUT upload (known size up to what minio-go sends in
+// one request, 16 MiB) is also conditional, which closes the race with a
+// concurrent writer. Multipart and unknown-size uploads are NOT conditional:
+// only the Stat guards them, and two concurrent writers of one key can both
+// succeed. Uploads stream: a source of unknown size goes up in 8 MiB parts
+// and may not exceed 8 MiB x 10,000 parts (about 78 GiB); a longer one fails
+// with ErrUnsupported and nothing is kept. A source longer than the declared
+// Size fails with ErrInvalidPath and nothing is kept. Delete removes the keys
+// under a folder in batches of 1,000. Move is a server-side copy followed by a
+// delete, so it is not atomic and a failure half way can leave both copies; a
+// folder is copied key by key.
 //
-// SHA-256: Write records the hash of the whole object as the user metadata
-// "odraz-sha256" (S3's own checksum of a multipart upload is only a
-// composite), and files.Hasher returns it; an object written by another tool
-// without it (and without a full-object SHA-256 checksum) gives ErrUnsupported,
-// and files.SHA256 then reads the object. Objects up to 8 MiB of known size
-// are hashed in memory before the single PUT; larger or unknown-size objects
-// are streamed and then copied onto themselves to add the metadata.
+// Failed or cancelled uploads are aborted best effort (RemoveIncompleteUpload
+// with a context that is not cancelled), but a crash can leave incomplete
+// multipart uploads behind, which are billed: give the bucket an
+// AbortIncompleteMultipartUpload lifecycle rule.
+//
+// SHA-256: Write records the whole object's hash as the user metadata
+// "odraz-sha256" with the value "<64 lowercase hex>:<size in bytes>" (S3's own
+// checksum of a multipart upload is only a composite), and files.Hasher
+// returns it. Callers cannot set that key through WriteOptions.Metadata; it is
+// dropped, also when spelled "X-Amz-Meta-Odraz-Sha256". SHA256 gives
+// ErrUnsupported when the key is missing or malformed, or when the size in it
+// differs from the object's current size (another tool rewrote the content and
+// kept the metadata); files.SHA256 then reads the object. LIMITATION: a
+// rewrite of the same length is not detected. The hash vouches for what this
+// driver wrote, and whoever must be sure has to verify by reading. A
+// full-object S3 SHA-256 checksum stored by another tool is accepted too.
+// Objects up to 8 MiB of known size are hashed in memory before the single
+// PUT; larger or unknown-size objects are streamed and then copied onto
+// themselves to add the metadata.
 package s3
 
 import (

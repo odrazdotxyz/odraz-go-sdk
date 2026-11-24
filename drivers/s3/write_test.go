@@ -19,6 +19,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
+	s3 "github.com/odrazdotxyz/odraz-go-sdk/drivers/s3"
+
 	odraz "github.com/odrazdotxyz/odraz-go-sdk"
 	"github.com/odrazdotxyz/odraz-go-sdk/accounts"
 	"github.com/odrazdotxyz/odraz-go-sdk/files"
@@ -637,4 +639,177 @@ func TestWriteNoOverwriteRaceReal(t *testing.T) {
 	if won != 1 {
 		t.Fatalf("%d writers succeeded, want 1", won)
 	}
+}
+
+func absent(t *testing.T, fsys files.FS, p string) {
+	t.Helper()
+	if _, err := fsys.Stat(context.Background(), p); !errors.Is(err, odraz.ErrNotFound) {
+		t.Fatalf("%s should not exist: %v", p, err)
+	}
+}
+
+func TestWriteLongerThanDeclaredSmall(t *testing.T) {
+	fsys, _ := openFS(t, "")
+	err := fsys.Write(context.Background(), "/long.txt", bytes.NewReader([]byte("0123456789")), files.WriteOptions{Size: 5})
+	if !errors.Is(err, odraz.ErrInvalidPath) {
+		t.Fatalf("err = %v", err)
+	}
+	absent(t, fsys, "/long.txt")
+}
+
+func TestWriteLongerThanDeclaredLargeReal(t *testing.T) {
+	fsys, _, _ := openReal(t)
+	const size = 9 << 20
+	data := make([]byte, size+10)
+	err := fsys.Write(context.Background(), "/long.bin", bytes.NewReader(data), files.WriteOptions{Size: size})
+	if !errors.Is(err, odraz.ErrInvalidPath) {
+		t.Fatalf("err = %v", err)
+	}
+	absent(t, fsys, "/long.bin")
+}
+
+// A stream over the cap must fail and leave nothing, not be stored cut off.
+func TestWriteUnknownSizeOverCapReal(t *testing.T) {
+	fsys, _, _ := openReal(t)
+	defer s3.SetUnknownSizeLimits(5<<20, 15<<20)()
+	ctx := context.Background()
+	err := fsys.Write(ctx, "/over.bin", bytes.NewReader(make([]byte, 20<<20)), files.WriteOptions{Size: -1})
+	if !errors.Is(err, odraz.ErrUnsupported) || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("err = %v", err)
+	}
+	absent(t, fsys, "/over.bin")
+	// Exactly at the cap is fine.
+	if err := fsys.Write(ctx, "/at.bin", bytes.NewReader(make([]byte, 15<<20)), files.WriteOptions{Size: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if e, err := fsys.Stat(ctx, "/at.bin"); err != nil || e.Size != 15<<20 {
+		t.Fatalf("stat %+v %v", e, err)
+	}
+}
+
+func TestReservedMetadataKeyCannotBeSet(t *testing.T) {
+	fsys, _ := openFS(t, "")
+	fake := strings.Repeat("0", 64) + ":4"
+	for i, key := range []string{"x-amz-meta-odraz-sha256", "X-Amz-Meta-Odraz-Sha256", "Odraz-Sha256", "ODRAZ-SHA256"} {
+		p := fmt.Sprintf("/r%d.txt", i)
+		if err := writeBytes(t, fsys, p, []byte("data"), files.WriteOptions{Metadata: map[string]string{key: fake, "keep": "me"}}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := fsys.(files.Hasher).SHA256(context.Background(), p)
+		if err != nil || got != hexSHA([]byte("data")) {
+			t.Fatalf("%s: sha256 = %q, %v", key, got, err)
+		}
+	}
+}
+
+func TestReservedMetadataKeyLargeReal(t *testing.T) {
+	fsys, _, _ := openReal(t)
+	data := make([]byte, 9<<20)
+	rand.New(rand.NewSource(1)).Read(data)
+	for _, size := range []int64{int64(len(data)), -1} {
+		md := map[string]string{"X-Amz-Meta-Odraz-Sha256": strings.Repeat("0", 64) + ":9437184", "odraz-sha256": "x"}
+		if err := fsys.Write(context.Background(), "/r.bin", bytes.NewReader(data), files.WriteOptions{Size: size, Overwrite: true, Metadata: md}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := fsys.(files.Hasher).SHA256(context.Background(), "/r.bin")
+		if err != nil || got != hexSHA(data) {
+			t.Fatalf("size %d: sha256 = %q, %v", size, got, err)
+		}
+	}
+}
+
+// Content rewritten by another tool that keeps the user metadata must not
+// keep vouching for the old hash.
+func TestSHA256RejectsRewrittenAndMalformed(t *testing.T) {
+	fsys, mc := openFS(t, "")
+	ctx := context.Background()
+	if err := writeBytes(t, fsys, "/h.txt", []byte("original"), files.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := mc.StatObject(ctx, fakeBucket, "h.txt", minio.StatObjectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := ""
+	for k, v := range st.UserMetadata {
+		if strings.EqualFold(k, "odraz-sha256") {
+			stored = v
+		}
+	}
+	if !strings.HasPrefix(stored, hexSHA([]byte("original"))+":8") {
+		t.Fatalf("stored value = %q", stored)
+	}
+	rewrite := func(key, value string, data []byte) {
+		t.Helper()
+		_, err := mc.PutObject(ctx, fakeBucket, key, bytes.NewReader(data), int64(len(data)),
+			minio.PutObjectOptions{UserMetadata: map[string]string{"Odraz-Sha256": value}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	hs := fsys.(files.Hasher)
+	rewrite("h.txt", stored, []byte("a different length"))
+	if _, err := hs.SHA256(ctx, "/h.txt"); !errors.Is(err, odraz.ErrUnsupported) {
+		t.Fatalf("rewritten: %v", err)
+	}
+	good := hexSHA([]byte("12345"))
+	for i, bad := range []string{good, good + ":", good + ":x", good + ":-5", strings.ToUpper(good) + ":5", good[:63] + ":5", "zz" + good[2:] + ":5", good + ":5:5"} {
+		key := fmt.Sprintf("bad%d.txt", i)
+		rewrite(key, bad, []byte("12345"))
+		if _, err := hs.SHA256(ctx, "/"+key); !errors.Is(err, odraz.ErrUnsupported) {
+			t.Fatalf("%q accepted: %v", bad, err)
+		}
+	}
+	rewrite("ok.txt", good+":5", []byte("12345"))
+	if got, err := hs.SHA256(ctx, "/ok.txt"); err != nil || got != good {
+		t.Fatalf("well formed: %q %v", got, err)
+	}
+}
+
+// A cancelled upload must not leave its parts behind. (MinIO filters the
+// listing of incomplete uploads by prefix unreliably, so list everything and
+// match the key's name, which is unique to this run.)
+func TestCancelledUploadLeavesNoIncompleteUploadReal(t *testing.T) {
+	fsys, mc, bucket := openReal(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	name := fmt.Sprintf("c-%d.bin", rand.Int63())
+	src := &cancelAfter{left: 40 << 20, after: 12 << 20, cancel: cancel}
+	if err := fsys.Write(ctx, "/"+name, src, files.WriteOptions{Size: -1}); err == nil {
+		t.Fatal("write succeeded")
+	}
+	n := 0
+	for u := range mc.ListIncompleteUploads(context.Background(), bucket, "", true) {
+		if u.Err != nil {
+			t.Fatal(u.Err)
+		}
+		if strings.HasSuffix(u.Key, "/"+name) {
+			n++
+			t.Logf("left over: %s", u.Key)
+		}
+	}
+	if n != 0 {
+		t.Fatalf("%d incomplete uploads left", n)
+	}
+	absent(t, fsys, "/"+name)
+}
+
+type cancelAfter struct {
+	left, after, n int64
+	cancel         func()
+}
+
+func (c *cancelAfter) Read(b []byte) (int, error) {
+	if c.left <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(b)) > c.left {
+		b = b[:c.left]
+	}
+	c.left -= int64(len(b))
+	c.n += int64(len(b))
+	if c.n >= c.after {
+		c.cancel()
+	}
+	return len(b), nil
 }

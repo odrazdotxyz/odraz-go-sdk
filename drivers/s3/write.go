@@ -14,6 +14,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +26,12 @@ import (
 )
 
 // shaMetaKey is the user metadata key (stored by S3 as X-Amz-Meta-Odraz-Sha256)
-// that holds the lowercase hex SHA-256 of the whole object. S3's own SHA-256
+// that holds "<64 lowercase hex SHA-256>:<size in bytes>" of the whole object.
+// The size binds the hash to its bytes a little: SHA256 refuses the value when
+// the object's current size differs (another tool rewrote the content but kept
+// the metadata). Same-length corruption or replacement is NOT detected: the hash
+// only vouches for what this driver wrote, and a caller that must be sure
+// has to verify by reading the object. S3's own SHA-256
 // checksum of a multipart upload is only a composite (a hash of the part
 // hashes), a single-part one needs trailing headers that not every server
 // accepts, and the hash of a stream is only known at its end, so Write always
@@ -37,6 +43,18 @@ const shaMetaKey = "odraz-sha256"
 // it is set here: 8 MiB parts allow about 78 GiB, and the memory in use is one
 // part. Uploads of known size keep the library's choice.
 const unknownSizePart = 8 << 20
+
+// maxUnknownParts is the part limit of S3 multipart uploads.
+const maxUnknownParts = 10000
+
+// Variables so tests can shrink them; production code never changes them.
+var (
+	unknownPartSize int64 = unknownSizePart
+	maxUnknownSize        = unknownPartSize * maxUnknownParts // largest stream of unknown length
+)
+
+// abortTimeout bounds the best-effort cleanup of a failed upload.
+const abortTimeout = 30 * time.Second
 
 // smallObject is the largest known size that Write reads into memory to hash
 // it before uploading.
@@ -90,12 +108,52 @@ func (f *fs) conditionalPut(ctx context.Context) bool {
 	return f.condPut
 }
 
-func lowerKeys(m map[string]string) map[string]string {
+// normMeta lowercases caller metadata keys, stripping a leading "x-amz-meta-"
+// (any case) so a caller cannot reach the S3 header of another key by its
+// full name. The reserved key of the stored hash is dropped, whatever its
+// spelling: callers cannot set it.
+func normMeta(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m)+1)
 	for k, v := range m {
-		out[strings.ToLower(k)] = v
+		k = strings.ToLower(k)
+		k = strings.TrimPrefix(k, "x-amz-meta-")
+		if k == shaMetaKey {
+			continue
+		}
+		out[k] = v
 	}
 	return out
+}
+
+// abortUpload removes incomplete multipart uploads of key, best effort. The
+// client library aborts a failed upload with the caller's context, which fails
+// exactly when the failure was a cancelled context, and a multipart copy
+// never aborts, so unfinished parts would stay (and be billed). It removes
+// every incomplete upload of the key, also one of a concurrent writer.
+func (f *fs) abortUpload(ctx context.Context, key string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
+	defer cancel()
+	_ = f.mc.RemoveIncompleteUpload(ctx, f.bucket, key)
+}
+
+// removeAfterFailure deletes an object a failed Write left behind.
+func (f *fs) removeAfterFailure(ctx context.Context, key string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
+	defer cancel()
+	_ = f.mc.RemoveObject(ctx, f.bucket, key, minio.RemoveObjectOptions{})
+}
+
+// moreData reports whether r still has bytes (a source longer than declared).
+func moreData(r io.Reader) (bool, error) {
+	var b [1]byte
+	n, err := io.ReadFull(r, b[:])
+	if n > 0 {
+		return true, nil
+	}
+	if err == io.EOF {
+		return false, nil
+	}
+	return false, err
 }
 
 // requireParent returns ErrNotFound unless the parent folder of p exists (the
@@ -132,17 +190,20 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 			return fmt.Errorf("s3: %s: %w", p, odraz.ErrExists)
 		}
 	case errors.Is(err, odraz.ErrNotFound):
-		// Not there yet. Stat-then-put is racy, so where the server supports
-		// it the put also carries If-None-Match: * and a writer that got in
-		// between makes it fail with 412 (ErrExists). On servers that ignore
-		// the header a concurrent writer can still be overwritten.
+		// Not there yet. Where the server supports it a single-PUT upload
+		// (known size up to the size minio-go sends in one request, 16 MiB)
+		// also carries If-None-Match: * and a writer that got in between makes
+		// it fail with 412 (ErrExists). Multipart and unknown-size uploads
+		// are NOT conditional (the library cannot make the completion
+		// conditional): only the Stat above guards them, and two concurrent
+		// writers of one key can both succeed. The same holds on servers that
+		// ignore the header.
 		cond = !opts.Overwrite && f.conditionalPut(ctx)
 	default:
 		return err
 	}
 
-	meta := lowerKeys(opts.Metadata)
-	delete(meta, shaMetaKey) // reserved
+	meta := normMeta(opts.Metadata)
 	po := minio.PutObjectOptions{UserMetadata: meta, ContentType: mime.TypeByExtension(path.Ext(p))}
 	if cond {
 		po.SetMatchETagExcept("*")
@@ -159,7 +220,12 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 			}
 			return err
 		}
-		meta[shaMetaKey] = hex.EncodeToString(hr.h.Sum(nil))
+		if more, err := moreData(r); err != nil {
+			return err
+		} else if more {
+			return fmt.Errorf("s3: %s: source is longer than the declared %d bytes: %w", p, opts.Size, odraz.ErrInvalidPath)
+		}
+		meta[shaMetaKey] = hashValue(hr.h.Sum(nil), opts.Size)
 		_, err := f.mc.PutObject(ctx, f.bucket, key, bytes.NewReader(buf), opts.Size, po)
 		return mapErr(err)
 	}
@@ -168,18 +234,40 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 	// known at the end, and user metadata can only be set at the start of an
 	// upload, so it is added afterwards by copying the object onto itself.
 	// The copy is server-side but its cost grows with the object.
+	src := io.Reader(hr)
 	if opts.Size < 0 {
-		po.PartSize = unknownSizePart
+		po.PartSize = uint64(unknownPartSize)
+		// Never hand the library more than it can upload, so that what is
+		// left over is seen below instead of being cut off silently.
+		hr.r = io.LimitReader(r, maxUnknownSize)
+	} else {
+		// Likewise for a source longer than declared: the library would
+		// fail half way; let it see exactly Size bytes and check below.
+		hr.r = io.LimitReader(r, opts.Size)
 	}
-	ui, err := f.mc.PutObject(ctx, f.bucket, key, hr, opts.Size, po)
+	ui, err := f.mc.PutObject(ctx, f.bucket, key, src, opts.Size, po)
 	if err != nil {
+		f.abortUpload(ctx, key)
 		return mapErr(err)
+	}
+	// A source longer than declared (known size) or than the cap (unknown
+	// size) would otherwise be stored cut off, with a hash of the cut-off
+	// bytes. Fail and remove the object instead.
+	if more, merr := moreData(r); merr != nil || more {
+		f.removeAfterFailure(ctx, key)
+		if merr != nil {
+			return merr
+		}
+		if opts.Size < 0 {
+			return fmt.Errorf("s3: %s: stream exceeds the maximum supported size of %d bytes: %w", p, maxUnknownSize, odraz.ErrUnsupported)
+		}
+		return fmt.Errorf("s3: %s: source is longer than the declared %d bytes: %w", p, opts.Size, odraz.ErrInvalidPath)
 	}
 	md := make(map[string]string, len(meta)+2)
 	for k, v := range meta {
 		md[k] = v
 	}
-	md[shaMetaKey] = hex.EncodeToString(hr.h.Sum(nil))
+	md[shaMetaKey] = hashValue(hr.h.Sum(nil), hr.n)
 	if po.ContentType != "" {
 		md["Content-Type"] = po.ContentType
 	}
@@ -188,7 +276,38 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 	_, err = f.mc.ComposeObject(ctx,
 		minio.CopyDestOptions{Bucket: f.bucket, Object: key, UserMetadata: md, ReplaceMetadata: true},
 		minio.CopySrcOptions{Bucket: f.bucket, Object: key, MatchETag: strings.Trim(ui.ETag, `"`)})
-	return mapErr(err)
+	if err != nil {
+		f.abortUpload(ctx, key) // a multipart copy (above 5 GiB) is never aborted by the library
+		return mapErr(err)
+	}
+	return nil
+}
+
+func hashValue(sum []byte, size int64) string {
+	return hex.EncodeToString(sum) + ":" + strconv.FormatInt(size, 10)
+}
+
+// parseHashValue splits "<64 lowercase hex>:<decimal size>".
+func parseHashValue(v string) (hexSum string, size int64, ok bool) {
+	h, sz, found := strings.Cut(v, ":")
+	if !found || len(h) != 2*sha256.Size || sz == "" || len(sz) > 19 {
+		return "", 0, false
+	}
+	for _, c := range h {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", 0, false
+		}
+	}
+	for _, c := range sz {
+		if c < '0' || c > '9' {
+			return "", 0, false
+		}
+	}
+	n, err := strconv.ParseInt(sz, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return h, n, true
 }
 
 // SHA256 returns the hash of the whole object: the user metadata Write
@@ -210,8 +329,15 @@ func (f *fs) SHA256(ctx context.Context, p string) (string, error) {
 		return "", fmt.Errorf("s3: %s: %w", p, odraz.ErrNotFound)
 	}
 	for k, v := range st.UserMetadata {
-		if strings.EqualFold(k, shaMetaKey) && len(v) == 2*sha256.Size {
-			return strings.ToLower(v), nil
+		if strings.EqualFold(k, shaMetaKey) {
+			h, size, ok := parseHashValue(v)
+			if !ok {
+				return "", fmt.Errorf("s3: %s: stored SHA-256 is malformed: %w", p, odraz.ErrUnsupported)
+			}
+			if size != st.Size {
+				return "", fmt.Errorf("s3: %s: stored SHA-256 is for %d bytes but the object has %d: %w", p, size, st.Size, odraz.ErrUnsupported)
+			}
+			return h, nil
 		}
 	}
 	// A composite checksum ("<base64>-<parts>") is not the object's hash.
@@ -441,5 +567,8 @@ func (f *fs) copyKey(ctx context.Context, src, dst string) error {
 	_, err := f.mc.ComposeObject(ctx,
 		minio.CopyDestOptions{Bucket: f.bucket, Object: dst},
 		minio.CopySrcOptions{Bucket: f.bucket, Object: src})
+	if err != nil {
+		f.abortUpload(ctx, dst) // a multipart copy (above 5 GiB) is never aborted by the library
+	}
 	return mapErr(err)
 }
