@@ -10,28 +10,65 @@ import (
 
 // Wrap returns an FS that normalizes every path with CleanPath before
 // calling inner, so adapters never see unclean or root-escaping paths.
-// Optional interfaces of inner (Copier, Previewer) are preserved.
+// Optional interfaces of inner (Copier, Previewer, Hasher) are preserved.
+//
+// Go cannot add methods conditionally, so each combination needs its own
+// type; they are built from independent one-method parts so adding another
+// optional interface means one part and its combinations, not new logic.
 func Wrap(inner FS) FS {
 	c := &cleanFS{inner}
 	cp, hasCp := inner.(Copier)
 	pv, hasPv := inner.(Previewer)
+	hs, hasHs := inner.(Hasher)
+	C, P, H := cleanCopy{cp}, cleanPreview{pv}, cleanHash{hs}
 	switch {
+	case hasCp && hasPv && hasHs:
+		return &struct {
+			*cleanFS
+			cleanCopy
+			cleanPreview
+			cleanHash
+		}{c, C, P, H}
 	case hasCp && hasPv:
-		return &cleanCopierPreviewerFS{&cleanCopierFS{c, cp}, &cleanPreviewerFS{c, pv}}
+		return &struct {
+			*cleanFS
+			cleanCopy
+			cleanPreview
+		}{c, C, P}
+	case hasCp && hasHs:
+		return &struct {
+			*cleanFS
+			cleanCopy
+			cleanHash
+		}{c, C, H}
+	case hasPv && hasHs:
+		return &struct {
+			*cleanFS
+			cleanPreview
+			cleanHash
+		}{c, P, H}
 	case hasCp:
-		return &cleanCopierFS{c, cp}
+		return &struct {
+			*cleanFS
+			cleanCopy
+		}{c, C}
 	case hasPv:
-		return &cleanPreviewerFS{c, pv}
+		return &struct {
+			*cleanFS
+			cleanPreview
+		}{c, P}
+	case hasHs:
+		return &struct {
+			*cleanFS
+			cleanHash
+		}{c, H}
 	}
 	return c
 }
 
-type cleanCopierFS struct {
-	*cleanFS
-	cp Copier
-}
+type cleanCopy struct{ cp Copier }
 
-func (c *cleanCopierFS) Copy(ctx context.Context, from, to string, ow bool) error {
+func (c cleanCopy) Copy(ctx context.Context, from, to string, ow bool) error {
 	from, err := CleanPath(from)
 	if err != nil {
 		return err
@@ -43,12 +80,9 @@ func (c *cleanCopierFS) Copy(ctx context.Context, from, to string, ow bool) erro
 	return c.cp.Copy(ctx, from, to, ow)
 }
 
-type cleanPreviewerFS struct {
-	*cleanFS
-	pv Previewer
-}
+type cleanPreview struct{ pv Previewer }
 
-func (c *cleanPreviewerFS) Preview(ctx context.Context, p string, w, h int) (io.ReadCloser, string, error) {
+func (c cleanPreview) Preview(ctx context.Context, p string, w, h int) (io.ReadCloser, string, error) {
 	p, err := CleanPath(p)
 	if err != nil {
 		return nil, "", err
@@ -56,13 +90,14 @@ func (c *cleanPreviewerFS) Preview(ctx context.Context, p string, w, h int) (io.
 	return c.pv.Preview(ctx, p, w, h)
 }
 
-type cleanCopierPreviewerFS struct {
-	*cleanCopierFS
-	pvfs *cleanPreviewerFS
-}
+type cleanHash struct{ hs Hasher }
 
-func (c *cleanCopierPreviewerFS) Preview(ctx context.Context, p string, w, h int) (io.ReadCloser, string, error) {
-	return c.pvfs.Preview(ctx, p, w, h)
+func (c cleanHash) SHA256(ctx context.Context, p string) (string, error) {
+	p, err := CleanPath(p)
+	if err != nil {
+		return "", err
+	}
+	return c.hs.SHA256(ctx, p)
 }
 
 type cleanFS struct{ in FS }

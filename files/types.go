@@ -58,6 +58,9 @@ type WriteOptions struct {
 	Overwrite bool  // default false: existing target gives ErrExists
 	// Progress, if set, is called with bytes sent so far and Size.
 	Progress func(done, total int64)
+	// Metadata is stored with the object (keys are case-insensitive).
+	// Backends without object metadata ignore it.
+	Metadata map[string]string
 }
 
 // FS is a filesystem rooted at a drive. All paths are drive-relative and
@@ -87,8 +90,8 @@ type Client interface {
 	OpenDrive(ctx context.Context, driveID string) (FS, error)
 }
 
-// Optional interfaces, detected by type assertion on FS. Copier and
-// Previewer are implemented by some adapters; EditorOpener is reserved.
+// Optional interfaces, detected by type assertion on FS. Copier,
+// Previewer and Hasher are implemented by some adapters; EditorOpener is reserved.
 type (
 	// Copier is implemented by backends with a native copy (WebDAV COPY).
 	// Use the Copy helper, which validates arguments and falls back to
@@ -102,6 +105,12 @@ type (
 	// (or the file type) has no preview.
 	Previewer interface {
 		Preview(ctx context.Context, path string, width, height int) (io.ReadCloser, string, error)
+	}
+	// Hasher returns the SHA-256 (lowercase hex) the backend stored for the
+	// file, or ErrUnsupported when it has none. Use the SHA256 helper, which
+	// falls back to reading the file.
+	Hasher interface {
+		SHA256(ctx context.Context, path string) (string, error)
 	}
 	// EditorOpener returns a URL to open the file in a web editor.
 	EditorOpener interface {
