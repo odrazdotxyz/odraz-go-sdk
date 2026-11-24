@@ -20,6 +20,24 @@
 // wins: Stat returns it and List on it returns ErrInvalidPath. Listing a
 // folder gives the modification time of a folder only when it is not a common
 // prefix (Stat finds the marker's time; List returns the zero time).
+//
+// Writing: Mkdir creates a zero-byte marker object "<key>/" for the folder and
+// every missing parent. Write needs an existing parent (a marker or any key
+// below it; the root always exists) and, without Overwrite, fails with
+// ErrExists; where the server honours "If-None-Match: *" (probed once per
+// drive) the put itself is conditional, otherwise a concurrent writer can
+// still be overwritten. Uploads stream: a source of unknown size goes up in
+// 8 MiB parts. Delete removes the keys under a folder in batches of 1,000.
+// Move is a server-side copy followed by a delete, so it is not atomic and a
+// failure half way can leave both copies; a folder is copied key by key.
+//
+// SHA-256: Write records the hash of the whole object as the user metadata
+// "odraz-sha256" (S3's own checksum of a multipart upload is only a
+// composite), and files.Hasher returns it; an object written by another tool
+// without it (and without a full-object SHA-256 checksum) gives ErrUnsupported,
+// and files.SHA256 then reads the object. Objects up to 8 MiB of known size
+// are hashed in memory before the single PUT; larger or unknown-size objects
+// are streamed and then copied onto themselves to add the metadata.
 package s3
 
 import (

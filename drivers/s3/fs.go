@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -24,6 +26,9 @@ type fs struct {
 	mc     *minio.Client
 	bucket string
 	prefix string // key prefix with trailing slash, or ""
+
+	condOnce sync.Once
+	condPut  bool // the server honours If-None-Match: * (see conditionalPut)
 }
 
 func isNotFound(err error) bool {
@@ -129,6 +134,7 @@ func (f *fs) List(ctx context.Context, p string) ([]files.Entry, error) {
 	for _, e := range byPath {
 		out = append(out, e)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }
 
@@ -194,15 +200,3 @@ func (r mappedReader) Read(b []byte) (int, error) {
 func (f *fs) Capabilities() files.Capabilities {
 	return files.Capabilities{RangeRead: true, ServerSideCopy: true}
 }
-
-// TODO(task 4): replaced by the real implementations in write.go.
-var errNotYet = fmt.Errorf("s3: not implemented yet: %w", odraz.ErrUnsupported)
-
-func (f *fs) Write(context.Context, string, io.Reader, files.WriteOptions) error { // TODO(task 4)
-	return errNotYet
-}
-func (f *fs) Mkdir(context.Context, string) error { return errNotYet } // TODO(task 4)
-func (f *fs) Move(context.Context, string, string, bool) error { // TODO(task 4)
-	return errNotYet
-}
-func (f *fs) Delete(context.Context, string, bool) error { return errNotYet } // TODO(task 4)
