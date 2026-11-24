@@ -94,7 +94,7 @@ func (f *fs) List(ctx context.Context, p string) ([]files.Entry, error) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var out []files.Entry
+	byPath := map[string]files.Entry{}
 	exists := p == "/" // the root always exists
 	// ListObjects pages through the bucket by itself until the listing ends.
 	for o := range f.mc.ListObjects(ctx, f.bucket, minio.ListObjectsOptions{Prefix: dir}) {
@@ -112,16 +112,22 @@ func (f *fs) List(ctx context.Context, p string) ([]files.Entry, error) {
 			if cp == "/" || strings.HasSuffix(cp, "/") {
 				continue // a key with an empty name segment
 			}
-			out = append(out, dirEntry(cp, time.Time{}))
+			if _, ok := byPath[cp]; !ok { // a file of the same name wins
+				byPath[cp] = dirEntry(cp, time.Time{})
+			}
 			continue
 		}
 		if strings.HasSuffix(cp, "/") || strings.Contains(strings.TrimPrefix(o.Key, dir), "/") {
 			continue
 		}
-		out = append(out, fileEntry(cp, o))
+		byPath[cp] = fileEntry(cp, o)
 	}
 	if !exists {
 		return nil, fmt.Errorf("s3: %s: %w", p, odraz.ErrNotFound)
+	}
+	out := make([]files.Entry, 0, len(byPath))
+	for _, e := range byPath {
+		out = append(out, e)
 	}
 	return out, nil
 }
@@ -134,8 +140,12 @@ func (f *fs) Read(ctx context.Context, p string, offset, length int64) (io.ReadC
 	opts := minio.GetObjectOptions{}
 	switch {
 	case length == 0:
-		if _, err := f.Stat(ctx, p); err != nil {
+		e, err := f.Stat(ctx, p)
+		if err != nil {
 			return nil, err
+		}
+		if e.IsDir {
+			return nil, fmt.Errorf("s3: %s is a folder: %w", p, odraz.ErrInvalidPath)
 		}
 		return io.NopCloser(strings.NewReader("")), nil
 	case length > 0:

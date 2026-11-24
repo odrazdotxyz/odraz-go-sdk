@@ -115,6 +115,10 @@ func TestFileAndFolderSameName(t *testing.T) {
 	if _, err := fsys.List(ctx, "/a"); !errors.Is(err, odraz.ErrInvalidPath) {
 		t.Fatalf("List err = %v, want ErrInvalidPath", err)
 	}
+	root, err := fsys.List(ctx, "/")
+	if err != nil || len(root) != 1 || root[0].Path != "/a" || root[0].IsDir {
+		t.Fatalf("List(/) = %+v, %v; want one file /a", root, err)
+	}
 }
 
 func TestRangeRead(t *testing.T) {
@@ -151,8 +155,10 @@ func TestRangeRead(t *testing.T) {
 func TestReadFolderIsInvalidPath(t *testing.T) {
 	fsys, mc := openFS(t, "")
 	put(t, mc, "dir/x", []byte("x"))
-	if _, err := fsys.Read(context.Background(), "/dir", 0, -1); !errors.Is(err, odraz.ErrInvalidPath) {
-		t.Fatalf("err = %v, want ErrInvalidPath", err)
+	for _, n := range []int64{-1, 0, 5} {
+		if _, err := fsys.Read(context.Background(), "/dir", 0, n); !errors.Is(err, odraz.ErrInvalidPath) {
+			t.Fatalf("length %d: err = %v, want ErrInvalidPath", n, err)
+		}
 	}
 }
 
