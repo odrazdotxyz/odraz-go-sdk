@@ -602,8 +602,11 @@ func TestListIsSorted(t *testing.T) {
 	}
 }
 
-// The conformance suite, against a real server (needs folder markers).
-func TestConformanceReal(t *testing.T) {
+// The conformance suite, against a real server (needs folder markers). This is
+// the only conformance coverage of the adapter: the in-process fake cannot
+// store folder markers or zero-byte objects, and fstest.Run cannot be subset.
+// Run it with testenv/minio (see the package doc).
+func TestConformanceMinIO(t *testing.T) {
 	realS3(t)
 	fstest.Run(t, func(t *testing.T) files.FS {
 		fsys, _, _ := openReal(t)

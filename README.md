@@ -208,6 +208,7 @@ go test ./...                                   # unit tests, in-memory and in-p
 testenv/webdav/seed.sh && export ODRAZ_TEST_WEBDAV_URL=http://localhost:8081/dav
 eval "$(testenv/nextcloud/seed.sh)"             # Nextcloud + Team folders, port 8082; needs Docker
 eval "$(testenv/opencloud/seed.sh)"             # needs Docker
+eval "$(testenv/minio/seed.sh)"                # MinIO for the S3 adapter, port 9300; needs Docker
 eval "$(testenv/proxy/seed.sh)"
 go test -race ./...                             # now also runs against the real servers
 ```

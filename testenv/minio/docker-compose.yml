@@ -1,0 +1,12 @@
+# MinIO for the S3 adapter tests. TEST ONLY: the credentials below are demo values, never use them anywhere real.
+# S3 API on http://localhost:9300 (plain HTTP). Run seed.sh to (re)create it with an empty bucket.
+services:
+  minio:
+    # Resolved from cgr.dev/chainguard/minio:latest on 2026-11-24 (Docker Hub and quay.io refuse pulls here).
+    image: cgr.dev/chainguard/minio@sha256:9f0aab4471ebb181be3cfabea21b719303ec583cd9abdb7779f9e53032b844f7
+    command: ["server", "/data", "--address", ":9000"]
+    ports: ["127.0.0.1:9300:9000"]
+    environment:
+      MINIO_ROOT_USER: odraz-test-only
+      MINIO_ROOT_PASSWORD: odraz-test-only-not-a-secret
+    tmpfs: ["/data:uid=65532,gid=65532"]   # fresh state on every `up`

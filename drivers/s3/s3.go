@@ -14,6 +14,12 @@
 //	path_style  "true" for path-style addressing; implied when endpoint is set
 //	            unless this is "false"
 //
+// Testing: the in-process fake cannot store folder markers, so the conformance
+// suite (TestConformanceMinIO) and the other *Real tests need a real server. Run
+// eval "$(testenv/minio/seed.sh)" and then go test ./drivers/s3/ -run MinIO; see
+// testenv/minio/README.md for the behaviour observed there. Without the
+// ODRAZ_TEST_S3_* variables those tests skip.
+//
 // Folders are virtual. A key ending in "/" is a folder marker; a path is a
 // folder if its marker exists or any key starts with "<key>/", and a file if
 // the exact key exists. If a key is both a file and a folder prefix, the file
