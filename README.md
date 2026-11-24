@@ -79,8 +79,9 @@ backend supports it, otherwise read+write), `ReadOnly`.
   which creates parents).
 - Errors work with `errors.Is` and always wrap the original error: `ErrNotFound`, `ErrExists`,
   `ErrNotEmpty`, `ErrPermission`, `ErrUnsupported`, `ErrAuth`, `ErrBlockedByProxy`, `ErrInvalidPath`.
-- Optional features are optional interfaces, found by type assertion: `files.Copier` today, `Previewer`
-  and `EditorOpener` reserved.
+- Optional features are optional interfaces, found by type assertion: `files.Copier`, `Previewer` and `Hasher`
+  today, `EditorOpener` reserved.
+- `WriteOptions.Metadata` sets object metadata on write; backends without object metadata ignore it.
 
 ## Capabilities
 
@@ -113,6 +114,8 @@ Other behaviour worth knowing:
   and the adapters fetch them (OpenCloud: WebDAV GET with `?preview=1`; Nextcloud: `core/preview` by file id). A
   backend or file type without one gives `ErrUnsupported`; fall back to reading the original. Which types get one is
   the server's decision (both render images and text files; video needs ffmpeg on Nextcloud). Plain WebDAV has none. The size is a hint: servers keep the aspect ratio and may round up to a cached size.
+- **Checksums** (`files.SHA256`, the optional `files.Hasher`): returns the lowercase hex SHA-256 of a file. It uses the
+  checksum the backend stored when it has one (`ErrUnsupported` otherwise), else streams the file through `crypto/sha256`.
 - Nextcloud: the personal drive is the user's files. Each **Team folder** (Group folders app) the user can see
   is also reported as a `DriveProject` drive with its own quota, and `ReadOnly` when the user has no write
   permission. It still appears as a normal folder inside the personal drive, as in Nextcloud's own UI. Quota
