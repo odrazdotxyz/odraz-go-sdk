@@ -687,10 +687,18 @@ func TestWriteUnknownSizeOverCapReal(t *testing.T) {
 	}
 }
 
+// Every way of spelling the reserved key, including doubled and tripled
+// prefixes that minio-go would strip down to it, and other x-amz- keys.
+var reservedSpellings = []string{
+	"x-amz-meta-odraz-sha256", "X-Amz-Meta-Odraz-Sha256", "Odraz-Sha256", "ODRAZ-SHA256",
+	"x-amz-meta-x-amz-meta-odraz-sha256", "X-AMZ-Meta-x-Amz-META-Odraz-Sha256",
+	"x-amz-meta-X-Amz-Meta-x-amz-meta-odraz-sha256", "x-amz-odraz-sha256",
+}
+
 func TestReservedMetadataKeyCannotBeSet(t *testing.T) {
 	fsys, _ := openFS(t, "")
 	fake := strings.Repeat("0", 64) + ":4"
-	for i, key := range []string{"x-amz-meta-odraz-sha256", "X-Amz-Meta-Odraz-Sha256", "Odraz-Sha256", "ODRAZ-SHA256"} {
+	for i, key := range reservedSpellings {
 		p := fmt.Sprintf("/r%d.txt", i)
 		if err := writeBytes(t, fsys, p, []byte("data"), files.WriteOptions{Metadata: map[string]string{key: fake, "keep": "me"}}); err != nil {
 			t.Fatal(err)
@@ -700,20 +708,39 @@ func TestReservedMetadataKeyCannotBeSet(t *testing.T) {
 			t.Fatalf("%s: sha256 = %q, %v", key, got, err)
 		}
 	}
+	// All spellings in one write, repeated so map order cannot hide a clash.
+	all := map[string]string{"keep": "me"}
+	for _, k := range reservedSpellings {
+		all[k] = fake
+	}
+	for i := 0; i < 20; i++ {
+		if err := writeBytes(t, fsys, "/all.txt", []byte("data"), files.WriteOptions{Overwrite: true, Metadata: all}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := fsys.(files.Hasher).SHA256(context.Background(), "/all.txt")
+		if err != nil || got != hexSHA([]byte("data")) {
+			t.Fatalf("all spellings: sha256 = %q, %v", got, err)
+		}
+	}
 }
 
 func TestReservedMetadataKeyLargeReal(t *testing.T) {
 	fsys, _, _ := openReal(t)
 	data := make([]byte, 9<<20)
 	rand.New(rand.NewSource(1)).Read(data)
-	for _, size := range []int64{int64(len(data)), -1} {
-		md := map[string]string{"X-Amz-Meta-Odraz-Sha256": strings.Repeat("0", 64) + ":9437184", "odraz-sha256": "x"}
-		if err := fsys.Write(context.Background(), "/r.bin", bytes.NewReader(data), files.WriteOptions{Size: size, Overwrite: true, Metadata: md}); err != nil {
-			t.Fatal(err)
-		}
-		got, err := fsys.(files.Hasher).SHA256(context.Background(), "/r.bin")
-		if err != nil || got != hexSHA(data) {
-			t.Fatalf("size %d: sha256 = %q, %v", size, got, err)
+	for i := 0; i < 5; i++ {
+		for _, size := range []int64{int64(len(data)), -1} {
+			md := map[string]string{"keep": "me"}
+			for _, k := range reservedSpellings {
+				md[k] = strings.Repeat("0", 64) + ":9437184"
+			}
+			if err := fsys.Write(context.Background(), "/r.bin", bytes.NewReader(data), files.WriteOptions{Size: size, Overwrite: true, Metadata: md}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := fsys.(files.Hasher).SHA256(context.Background(), "/r.bin")
+			if err != nil || got != hexSHA(data) {
+				t.Fatalf("size %d: sha256 = %q, %v", size, got, err)
+			}
 		}
 	}
 }

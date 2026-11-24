@@ -108,16 +108,22 @@ func (f *fs) conditionalPut(ctx context.Context) bool {
 	return f.condPut
 }
 
-// normMeta lowercases caller metadata keys, stripping a leading "x-amz-meta-"
-// (any case) so a caller cannot reach the S3 header of another key by its
-// full name. The reserved key of the stored hash is dropped, whatever its
-// spelling: callers cannot set it.
+// normMeta normalises caller metadata keys: it lowercases them and strips
+// "x-amz-meta-" prefixes (any case, repeatedly), then DROPS the reserved key of
+// the stored hash and every key that still starts with "x-amz-". minio-go
+// sends a key that starts with "x-amz-" as a raw header (PutObjectOptions.Header)
+// and strips one "x-amz-meta-" from keys on a self-copy (filterCustomMeta), so
+// with this normalisation no key reaching it can be, or become, the reserved
+// key in any spelling, and the real hash is the only one sent. Callers
+// cannot set the reserved key; their value is silently dropped.
 func normMeta(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m)+1)
 	for k, v := range m {
 		k = strings.ToLower(k)
-		k = strings.TrimPrefix(k, "x-amz-meta-")
-		if k == shaMetaKey {
+		for strings.HasPrefix(k, "x-amz-meta-") {
+			k = strings.TrimPrefix(k, "x-amz-meta-")
+		}
+		if k == shaMetaKey || strings.HasPrefix(k, "x-amz-") {
 			continue
 		}
 		out[k] = v
