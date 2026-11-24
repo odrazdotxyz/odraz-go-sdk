@@ -8,7 +8,7 @@ types, without knowing the protocol underneath.
 go get github.com/odrazdotxyz/odraz-go-sdk
 ```
 
-Go 1.23+. Status: **v1 = accounts + files** with a generic WebDAV adapter, an OpenCloud adapter and a Nextcloud adapter.
+Go 1.23+. Status: **v1 = accounts + files** with a generic WebDAV adapter, an OpenCloud adapter, a Nextcloud adapter and an S3 adapter (in progress).
 
 ## Domains
 
@@ -29,6 +29,7 @@ not change existing domains (`files.ForAccount` today, `calendar.ForAccount` lat
 | Adapter | Package | Domains | Login |
 |---|---|---|---|
 | WebDAV | `drivers/webdav` | files | username + password |
+| S3 (AWS, MinIO, Ceph, R2, B2...) | `drivers/s3` | files (account, validation and drive so far) | access key ID + secret access key |
 | OpenCloud | `vendors/opencloud` | files | username + app token, or OIDC browser login |
 | Nextcloud | `vendors/nextcloud` | files | username + app password |
 
