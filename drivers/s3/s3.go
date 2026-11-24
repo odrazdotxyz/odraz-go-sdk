@@ -13,6 +13,13 @@
 //	prefix      optional folder inside the bucket, no leading slash
 //	path_style  "true" for path-style addressing; implied when endpoint is set
 //	            unless this is "false"
+//
+// Folders are virtual. A key ending in "/" is a folder marker; a path is a
+// folder if its marker exists or any key starts with "<key>/", and a file if
+// the exact key exists. If a key is both a file and a folder prefix, the file
+// wins: Stat returns it and List on it returns ErrInvalidPath. Listing a
+// folder gives the modification time of a folder only when it is not a common
+// prefix (Stat finds the marker's time; List returns the zero time).
 package s3
 
 import (
@@ -132,6 +139,8 @@ func newMinio(ctx context.Context, env *accounts.Env, s settings) (*minio.Client
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = env.TLS
+	// Unlike internal/dav this sets no CheckRedirect: minio handles region
+	// redirects itself.
 	var rt http.RoundTripper = tr
 	if len(env.Headers) > 0 {
 		rt = headerTransport{base: tr, headers: env.Headers}
@@ -166,6 +175,10 @@ func validate(ctx context.Context, env *accounts.Env) error {
 	if err != nil {
 		return err
 	}
+	// Cancel on return: breaking out of the loop below would otherwise leave
+	// the listing goroutine and its connection behind.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	// Listing one key proves the keys, the bucket and read access in one request.
 	opts := minio.ListObjectsOptions{Prefix: s.prefix, MaxKeys: 1}
 	if s.prefix != "" {
@@ -220,6 +233,5 @@ func (c *client) OpenDrive(_ context.Context, id string) (files.FS, error) {
 	if id != DriveID {
 		return nil, fmt.Errorf("s3: no drive %q: %w", id, odraz.ErrNotFound)
 	}
-	// Replaced by the wrapped filesystem in the next task.
-	return nil, fmt.Errorf("s3: filesystem not implemented yet: %w", odraz.ErrUnsupported)
+	return files.Wrap(&fs{mc: c.mc, bucket: c.s.bucket, prefix: keyPrefix(c.s.prefix)}), nil
 }

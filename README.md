@@ -29,7 +29,7 @@ not change existing domains (`files.ForAccount` today, `calendar.ForAccount` lat
 | Adapter | Package | Domains | Login |
 |---|---|---|---|
 | WebDAV | `drivers/webdav` | files | username + password |
-| S3 (AWS, MinIO, Ceph, R2, B2...) | `drivers/s3` | files (account, validation and drive so far) | access key ID + secret access key |
+| S3 (AWS, MinIO, Ceph, R2, B2...) | `drivers/s3` | files (account, validation, browsing and reading so far) | access key ID + secret access key |
 | OpenCloud | `vendors/opencloud` | files | username + app token, or OIDC browser login |
 | Nextcloud | `vendors/nextcloud` | files | username + app password |
 
