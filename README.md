@@ -99,18 +99,23 @@ Limits to know before you rely on it (details and provider notes in the
   **untested** (as are Ceph and other S3 servers). The conformance suite runs only against a real MinIO
   (`testenv/minio`); there is no always-on conformance test.
 - **Folders** are zero-byte marker objects (`name/`) or just common key prefixes.
-- **`Move` is copy plus delete**, not atomic. `Copy` and `Move` lose the `Content-Type` of non-empty files
-  (they become `application/octet-stream`).
+- **`Move` is copy plus delete**, not atomic. `Copy` and `Move` keep the `Content-Type`, the other standard
+  headers and the user metadata.
 - **No overwrite** is only race-free for single-PUT uploads (known size up to 16 MiB) on servers that honour
-  `If-None-Match: *`. Larger and unknown-size (multipart) uploads that overlap in time can both succeed.
+  `If-None-Match: *`. Larger and unknown-size (multipart) uploads only check before they start, so ones that
+  overlap in time can both succeed.
+- **A source that does not match** fails the `Write` and replaces nothing, also with `Overwrite`: one longer or
+  shorter than `Size`, past the unknown-size limit, or returning an error.
+- **Metadata** keys `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Content-Language`,
+  `Content-Type` and `Expires` set those headers; the rest is user metadata, and non-ASCII values are stored
+  RFC 2047-encoded. Control characters in a value are refused (`ErrInvalidPath`).
 - **The stored SHA-256** (user metadata `odraz-sha256`) is set only by this adapter, and a rewrite of the same
   length by another tool is not detected.
 - **Uploads above 8 MiB and of unknown size** are copied server-side a second time to attach the hash: they need
   read permission and cost twice. If that copy fails, `Write` returns an error although the content is stored.
   Unknown-size uploads are limited to about 78 GiB.
-- **Overwriting with a wrong `Size`**: if such an upload (above 8 MiB, or past the unknown-size limit) turns out
-  longer than allowed, the stored object is deleted, so the previous file is lost.
-- **Reads** at or past the end of a file return an error, not empty data.
+- **Reads** from an offset above 0 at or past the end of a file fail, as does a positive length on an empty
+  file; reading a whole empty file works.
 - **Auth proxies** are not detected (no `ErrBlockedByProxy`).
 - Give the bucket an **`AbortIncompleteMultipartUpload` lifecycle rule**: a crash can leave unfinished, billed
   uploads behind.
@@ -139,7 +144,7 @@ backend supports it, otherwise read+write), `ReadOnly`.
 (`files/fstest`); capabilities only describe how.
 
 | Capability | WebDAV (Apache `mod_dav`) | OpenCloud personal / project | OpenCloud Shares space | S3 |
-|---|---|---|---|---|---|
+|---|---|---|---|---|
 | `AtomicMove` | yes | yes | no | no |
 | `RealDirectories` | yes | yes | yes | no |
 | `RangeRead` | yes | yes | yes | yes |
@@ -154,7 +159,8 @@ Other behaviour worth knowing (the S3 adapter's own limits are listed above):
   does), so there is a small race window between the two requests.
 - Deleting a non-empty folder without `recursive` is a list followed by a delete (WebDAV DELETE is always
   recursive); same race window.
-- Reads at or past the end of a file return no data on the WebDAV based adapters (S3 returns an error).
+- Reads at or past the end of a file return no data on the WebDAV based adapters. S3 returns an error for them
+  (details above).
 - WebDAV uploads are a single PUT. TUS (resumable uploads) is planned.
 - OpenCloud quota with `total: 0` means unlimited and is reported as `Quota.Total == -1`.
 - **Avatars** (`Handle.Avatar`, the optional `Adapter.Avatar`): the signed-in user's profile picture. Nextcloud always

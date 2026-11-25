@@ -11,7 +11,8 @@
 //	endpoint    optional URL of an S3-compatible server; empty means AWS.
 //	            accounts.Configure requires http:// or https://; a bare
 //	            host:port set directly in Config is taken as https.
-//	            No path or query.
+//	            No credentials, path, query or fragment; the errors about such an
+//	            endpoint do not repeat it.
 //	region      default us-east-1
 //	bucket      required
 //	prefix      optional folder inside the bucket (outer slashes are ignored)
@@ -46,8 +47,8 @@
 //	Ceph and others their S3 endpoint; untested
 //
 // Points to check on an untested provider: multipart uploads ask for CRC32C
-// checksums; copies above about 524 MiB use parts whose sizes can differ by one
-// byte, while some services (R2 documents this) want equal parts; and the
+// checksums; objects above 5 GiB are copied in parts whose sizes can differ by
+// one byte, while some services (R2 documents this) want equal parts; and the
 // conditional put described below may be ignored. On a versioned bucket (B2
 // buckets keep versions) deleted and replaced objects stay as old versions, and
 // every upload that is copied a second time leaves two.
@@ -69,38 +70,48 @@
 //
 // # Reading
 //
-// Read supports ranges. Unlike the contract of the other adapters, an offset at
-// or past the end of a file (also any range of an empty file) is an error from
-// the returned reader (MinIO answers InvalidRange), not an empty result.
+// Read supports ranges. A range that starts at an offset above 0 and at or past
+// the end of the file fails, and so does asking an empty file for a positive
+// length: the returned reader gives the server's error (MinIO answers
+// InvalidRange). Reading a whole file (offset 0, negative length) works, also an
+// empty one. A range that only ends past the end is cut off there, and length 0
+// gives an empty result.
 //
 // # Writing
 //
 // Write needs an existing parent (a marker or any key below it; the root always
-// exists) and, without Overwrite, fails with ErrExists after a Stat. Where the
-// server honours "If-None-Match: *" such a Write also sends that header. This is
-// found out once per drive by writing and deleting a small ".odraz-probe-*" object
-// under the prefix (it remains if deleting is not permitted). For a single-PUT
-// upload (known size up to what minio-go sends in one request, 16 MiB) the server
-// enforces the header on the put, which closes the race with a concurrent writer.
-// For multipart uploads (known size above 16 MiB, and every upload of unknown
-// size) it is sent when the upload is initiated but NOT on completion (the
-// high-level PutObject cannot send it there): the server checks it when the upload
-// starts, so two writers whose uploads overlap in time can both succeed. On
-// servers that ignore the header only the Stat guards any upload.
+// exists) and, without Overwrite, fails with ErrExists after a Stat. A single-PUT
+// upload (known size up to 16 MiB) also sends "If-None-Match: *" where the
+// server honours it, and the server then enforces it on the put, which closes the
+// race with a concurrent writer. Whether it does is found out once per drive by
+// writing and deleting a small ".odraz/probe-*" object under the prefix (it, and
+// with it a folder ".odraz", remains if deleting is not permitted). Multipart
+// uploads (known size above 16 MiB, and every upload of unknown size) do not
+// send the header: the high-level PutObject can only send it when the upload is
+// initiated, not on completion. Only the Stat guards them, so two writers whose
+// uploads overlap in time can both succeed. On servers that ignore the header
+// only the Stat guards any upload.
 //
 // Uploads stream. A source of unknown size goes up in 8 MiB parts and may not
 // exceed 8 MiB x 10,000 parts (about 78 GiB); a longer one fails with
 // ErrUnsupported. A source longer than the declared Size fails with
-// ErrInvalidPath. In both cases nothing of the new content is kept, but for
-// uploads above 8 MiB or of unknown size the excess is only seen after the object
-// has been stored, and the object is then deleted: with Overwrite, THE PREVIOUS
-// OBJECT IS LOST. Progress counts bytes read from the source; it can reach the
-// total while the upload and the second copy (below) are still running.
+// ErrInvalidPath, and one that fails or ends before the declared Size fails the
+// Write too. In all these cases the upload is never completed: nothing of the new
+// content is stored as the object, and with Overwrite the previous object stays
+// as it was (the parts of a multipart upload are aborted best effort, below).
+// Progress counts bytes read from the source; it can reach the total while the
+// upload and the second copy (below) are still running.
 //
-// WriteOptions.Metadata becomes user metadata (x-amz-meta-*); the client library
-// sends keys that name standard headers, such as Cache-Control, as those headers.
-// Keys starting with "x-amz-" (after removing "x-amz-meta-") are dropped. The
-// files API cannot read metadata back.
+// WriteOptions.Metadata becomes user metadata (x-amz-meta-*), except that the
+// keys Cache-Control, Content-Disposition, Content-Encoding, Content-Language,
+// Content-Type and Expires (in any case) set those headers. Without Content-Type
+// the one of the file name's extension is used; Expires must be an HTTP date.
+// Keys starting with "x-amz-" (after removing "x-amz-meta-") are dropped. A name
+// that is not a valid header name or starts with "x-minio-", a value with CR, LF
+// or another control character (tab is allowed) and an unreadable Expires fail
+// with ErrInvalidPath before anything is sent. Values that are not ASCII are
+// stored RFC 2047-encoded ("=?UTF-8?q?...?=", as seen on MinIO; mime.WordDecoder
+// decodes them). The files API cannot read metadata back.
 //
 // Failed or cancelled uploads are aborted best effort (RemoveIncompleteUpload
 // with a context that is not cancelled), but a crash can leave incomplete
@@ -110,13 +121,15 @@
 // # Delete, Move and Copy
 //
 // Delete removes the keys under a folder in batches of 1,000. Copy is a
-// server-side copy, key by key for a folder. Move is that copy followed by a
-// delete, so it is not atomic and a failure half way can leave both copies. When
-// a folder replaces or is replaced (overwrite), the target is deleted before the
-// copy starts. Copy and Move keep user metadata, including the stored SHA-256,
-// but NOT the Content-Type: a copied or moved non-empty file is
-// "application/octet-stream" afterwards (the library copies it as a multipart
-// upload), and its ETag changes.
+// server-side copy, key by key for a folder: one CopyObject request for an object
+// up to 5 GiB, a multipart copy above that (tested only with that limit lowered).
+// Move is that copy followed by a delete, so it is not atomic and a failure half
+// way can leave both copies. When a folder replaces or is replaced (overwrite),
+// the target is deleted before the copy starts. Copy and Move keep the
+// Content-Type, the other headers listed above and the user metadata, including
+// the stored SHA-256; the ETag can change. Each file is asked for its metadata
+// first, because MinIO loses Expires in a plain copy: such an object, like one
+// above 5 GiB, is copied with its headers and metadata set again.
 //
 // # SHA-256
 //
@@ -135,8 +148,8 @@
 //
 // Objects up to 8 MiB of known size are hashed in memory before the single PUT.
 // Larger and unknown-size objects are streamed and then copied server-side onto
-// themselves to add the metadata. That second copy needs read permission and
-// costs a second time. If it fails, Write returns the error although the new
+// themselves to add the metadata (and the headers once more). That second copy
+// needs read permission and costs a second time. If it fails, Write returns the error although the new
 // content is already stored (without a hash).
 //
 // # Testing
@@ -150,6 +163,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -225,12 +239,17 @@ func parseSettings(acc accounts.Account) (settings, error) {
 	if !strings.Contains(ep, "://") {
 		ep = "https://" + ep
 	}
+	// No message here repeats the endpoint or any part of it: someone may have
+	// put credentials in it, and a secret with "/", "?" or "#" in it ends up in
+	// what parses as the host, path, query or fragment.
 	u, err := url.Parse(ep)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return s, fmt.Errorf("s3: invalid endpoint %q", cfg["endpoint"])
-	}
-	if p := strings.Trim(u.Path, "/"); p != "" || u.RawQuery != "" {
-		return s, fmt.Errorf("s3: endpoint %q must be a host without a path", cfg["endpoint"])
+	switch {
+	case err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https"):
+		return s, errors.New("s3: invalid endpoint: want http(s)://host[:port]")
+	case u.User != nil:
+		return s, errors.New("s3: invalid endpoint: it must not contain credentials (the access key ID and secret access key are separate fields)")
+	case strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(ep, "#"):
+		return s, errors.New("s3: invalid endpoint: it must be a host without a path, query or fragment")
 	}
 	s.endpoint = u.Host
 	s.secure = u.Scheme == "https"

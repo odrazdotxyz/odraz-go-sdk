@@ -47,6 +47,11 @@ func mapOp(op string, err error, validating bool) error {
 	if resp.Code == "" && resp.StatusCode == 0 {
 		return err // not an S3 error: network, TLS, ...
 	}
+	// The client library refuses some requests before sending them and reports
+	// that as InvalidArgument with itself as the request id.
+	if resp.Code == "InvalidArgument" && resp.RequestID == "minio" {
+		return newMapped("request rejected before it was sent (check names and metadata)", resp.Code, odraz.ErrInvalidPath, err)
+	}
 	switch resp.Code {
 	case "InvalidAccessKeyId", "SignatureDoesNotMatch", "InvalidToken", "ExpiredToken", "AuthorizationHeaderMalformed":
 		return newMapped(op, resp.Code, odraz.ErrAuth, err)

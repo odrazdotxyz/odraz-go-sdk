@@ -11,9 +11,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"mime"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,12 +51,21 @@ var (
 	maxUnknownSize        = unknownPartSize * maxUnknownParts // largest stream of unknown length
 )
 
+// singlePutLimit is the largest known size sent as one PUT request. It is set
+// as the part size of such an upload, so that this driver, not the library,
+// decides which uploads are a single PUT (and may carry If-None-Match).
+const singlePutLimit = 16 << 20
+
 // abortTimeout bounds the best-effort cleanup of a failed upload.
 const abortTimeout = 30 * time.Second
 
 // smallObject is the largest known size that Write reads into memory to hash
 // it before uploading.
 const smallObject = 8 << 20
+
+// maxCopyObject is the largest object S3 copies in one CopyObject request.
+// A variable so tests can shrink it; production code never changes it.
+var maxCopyObject int64 = 5 << 30
 
 // copyWorkers is how many objects a folder copy or move copies at once.
 const copyWorkers = 8
@@ -85,6 +92,11 @@ func (h *hashReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// probeKey starts the name of the throwaway object of conditionalPut, in a
+// folder of its own so that it does not show among the user's files (the folder
+// is virtual and goes with the object; both stay only if deleting fails).
+const probeKey = ".odraz/probe-"
+
 // conditionalPut reports whether the server honours "If-None-Match: *" on
 // PUT, found out once per drive by trying it on a throwaway key: a second
 // conditional PUT must fail with 412. A server that answers 501 or ignores the
@@ -95,7 +107,7 @@ func (f *fs) conditionalPut(ctx context.Context) bool {
 		defer cancel()
 		var rnd [8]byte
 		_, _ = crand.Read(rnd[:])
-		key := f.prefix + ".odraz-probe-" + hex.EncodeToString(rnd[:])
+		key := f.prefix + probeKey + hex.EncodeToString(rnd[:])
 		if _, err := f.mc.PutObject(ctx, f.bucket, key, bytes.NewReader([]byte{0}), 1, minio.PutObjectOptions{}); err != nil {
 			return
 		}
@@ -108,59 +120,16 @@ func (f *fs) conditionalPut(ctx context.Context) bool {
 	return f.condPut
 }
 
-// normMeta normalises caller metadata keys: it lowercases them and strips
-// "x-amz-meta-" prefixes (any case, repeatedly), then DROPS the reserved key of
-// the stored hash and every key that still starts with "x-amz-". minio-go
-// sends a key that starts with "x-amz-" as a raw header (PutObjectOptions.Header)
-// and strips one "x-amz-meta-" from keys on a self-copy (filterCustomMeta), so
-// with this normalisation no key reaching it can be, or become, the reserved
-// key in any spelling, and the real hash is the only one sent. Callers
-// cannot set the reserved key; their value is silently dropped.
-func normMeta(m map[string]string) map[string]string {
-	out := make(map[string]string, len(m)+1)
-	for k, v := range m {
-		k = strings.ToLower(k)
-		for strings.HasPrefix(k, "x-amz-meta-") {
-			k = strings.TrimPrefix(k, "x-amz-meta-")
-		}
-		if k == shaMetaKey || strings.HasPrefix(k, "x-amz-") {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
 // abortUpload removes incomplete multipart uploads of key, best effort. The
 // client library aborts a failed upload with the caller's context, which fails
-// exactly when the failure was a cancelled context, and a multipart copy (what
-// ComposeObject does for every non-empty object) never aborts, so unfinished
-// parts would stay (and be billed). It removes every incomplete upload of the
+// exactly when the failure was a cancelled context, and a multipart copy (used
+// above maxCopyObject) never aborts, so unfinished parts would stay (and be
+// billed). It removes every incomplete upload of the
 // key, also one of a concurrent writer.
 func (f *fs) abortUpload(ctx context.Context, key string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
 	defer cancel()
 	_ = f.mc.RemoveIncompleteUpload(ctx, f.bucket, key)
-}
-
-// removeAfterFailure deletes an object a failed Write left behind.
-func (f *fs) removeAfterFailure(ctx context.Context, key string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
-	defer cancel()
-	_ = f.mc.RemoveObject(ctx, f.bucket, key, minio.RemoveObjectOptions{})
-}
-
-// moreData reports whether r still has bytes (a source longer than declared).
-func moreData(r io.Reader) (bool, error) {
-	var b [1]byte
-	n, err := io.ReadFull(r, b[:])
-	if n > 0 {
-		return true, nil
-	}
-	if err == io.EOF {
-		return false, nil
-	}
-	return false, err
 }
 
 // requireParent returns ErrNotFound unless the parent folder of p exists (the
@@ -184,10 +153,19 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 	if p == "/" {
 		return fmt.Errorf("s3: cannot write to /: %w", odraz.ErrInvalidPath)
 	}
+	// Bad metadata fails before any request and before the source is touched.
+	po, err := putOptions(p, opts.Metadata)
+	if err != nil {
+		return err
+	}
 	if err := f.requireParent(ctx, p); err != nil {
 		return err
 	}
+	// The metadata of the second copy (below), taken before the library gets
+	// po: it adds entries of its own to the map.
+	md := replacementMetadata(po)
 	key := keyOf(f.prefix, p)
+	single := opts.Size >= 0 && opts.Size <= singlePutLimit
 	cond := false
 	existing, err := f.Stat(ctx, p)
 	switch {
@@ -197,42 +175,49 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 			return fmt.Errorf("s3: %s: %w", p, odraz.ErrExists)
 		}
 	case errors.Is(err, odraz.ErrNotFound):
-		// Not there yet. Where the server supports it the upload also carries
-		// If-None-Match: *. A single-PUT upload (known size up to the size minio-go
-		// sends in one request, 16 MiB) is checked on the put, so a writer that got
-		// in between makes it fail with 412 (ErrExists). A multipart upload (known
-		// size above that, or unknown size) sends the header when it is initiated
-		// but not on completion (the high-level PutObject cannot send it there), so
-		// two writers whose uploads overlap in time can both succeed. On servers
-		// that ignore the header only the Stat above guards any upload.
-		cond = !opts.Overwrite && f.conditionalPut(ctx)
+		// Not there yet. Where the server supports it a single-PUT upload also
+		// carries If-None-Match: *, so a writer that got in between makes it fail
+		// with 412 (ErrExists). A multipart upload does not send the header: the
+		// high-level PutObject can only send it when the upload is initiated, not
+		// on completion (where AWS documents it), so only the Stat above guards
+		// it, as it does every upload on servers that ignore the header.
+		cond = !opts.Overwrite && single && f.conditionalPut(ctx)
 	default:
 		return err
 	}
 
-	meta := normMeta(opts.Metadata)
-	po := minio.PutObjectOptions{UserMetadata: meta, ContentType: mime.TypeByExtension(path.Ext(p))}
+	if single {
+		po.PartSize = singlePutLimit
+	}
 	if cond {
 		po.SetMatchETagExcept("*")
 	}
-	hr := &hashReader{r: r, h: sha256.New(), total: opts.Size, progress: opts.Progress}
+	var lim *strictReader
+	if opts.Size < 0 {
+		po.PartSize = uint64(unknownPartSize)
+		lim = newStrictReader(r, maxUnknownSize,
+			fmt.Errorf("s3: %s: stream exceeds the maximum supported size of %d bytes: %w", p, maxUnknownSize, odraz.ErrUnsupported))
+	} else {
+		lim = newStrictReader(r, opts.Size,
+			fmt.Errorf("s3: %s: source is longer than the declared %d bytes: %w", p, opts.Size, odraz.ErrInvalidPath))
+	}
+	hr := &hashReader{r: lim, h: sha256.New(), total: opts.Size, progress: opts.Progress}
 
 	if opts.Size >= 0 && opts.Size <= smallObject {
 		// Small: read it (at most 8 MiB) so the hash is known before the
 		// request, and store it in the same PUT.
 		buf := make([]byte, opts.Size)
-		if _, err := io.ReadFull(hr, buf); err != nil {
-			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-				return fmt.Errorf("s3: %s: source ended before %d bytes: %w", p, opts.Size, io.ErrUnexpectedEOF)
-			}
+		_, rerr := io.ReadFull(hr, buf)
+		if rerr == nil {
+			lim.finish() // an empty source has not been looked at yet
+		}
+		if err := lim.failure(); err != nil {
 			return err
 		}
-		if more, err := moreData(r); err != nil {
-			return err
-		} else if more {
-			return fmt.Errorf("s3: %s: source is longer than the declared %d bytes: %w", p, opts.Size, odraz.ErrInvalidPath)
+		if rerr != nil {
+			return fmt.Errorf("s3: %s: source ended before %d bytes: %w", p, opts.Size, io.ErrUnexpectedEOF)
 		}
-		meta[shaMetaKey] = hashValue(hr.h.Sum(nil), opts.Size)
+		po.UserMetadata[shaMetaKey] = hashValue(hr.h.Sum(nil), opts.Size)
 		_, err := f.mc.PutObject(ctx, f.bucket, key, bytes.NewReader(buf), opts.Size, po)
 		return mapErr(err)
 	}
@@ -241,50 +226,49 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 	// known at the end, and user metadata can only be set at the start of an
 	// upload, so it is added afterwards by copying the object onto itself.
 	// The copy is server-side but its cost grows with the object.
-	src := io.Reader(hr)
-	if opts.Size < 0 {
-		po.PartSize = uint64(unknownPartSize)
-		// Never hand the library more than it can upload, so that what is
-		// left over is seen below instead of being cut off silently.
-		hr.r = io.LimitReader(r, maxUnknownSize)
-	} else {
-		// Likewise for a source longer than declared: the library would
-		// fail half way; let it see exactly Size bytes and check below.
-		hr.r = io.LimitReader(r, opts.Size)
+	// lim never lets a source that fails or holds too much complete the
+	// upload, so nothing is replaced then.
+	ui, err := f.mc.PutObject(ctx, f.bucket, key, hr, opts.Size, po)
+	if serr := lim.failure(); serr != nil {
+		f.abortUpload(ctx, key)
+		return serr
 	}
-	ui, err := f.mc.PutObject(ctx, f.bucket, key, src, opts.Size, po)
 	if err != nil {
 		f.abortUpload(ctx, key)
 		return mapErr(err)
 	}
-	// A source longer than declared (known size) or than the cap (unknown
-	// size) would otherwise be stored cut off, with a hash of the cut-off
-	// bytes. Fail and remove the object instead.
-	if more, merr := moreData(r); merr != nil || more {
-		f.removeAfterFailure(ctx, key)
-		if merr != nil {
-			return merr
-		}
-		if opts.Size < 0 {
-			return fmt.Errorf("s3: %s: stream exceeds the maximum supported size of %d bytes: %w", p, maxUnknownSize, odraz.ErrUnsupported)
-		}
-		return fmt.Errorf("s3: %s: source is longer than the declared %d bytes: %w", p, opts.Size, odraz.ErrInvalidPath)
-	}
-	md := make(map[string]string, len(meta)+2)
-	for k, v := range meta {
-		md[k] = v
-	}
 	md[shaMetaKey] = hashValue(hr.h.Sum(nil), hr.n)
-	if po.ContentType != "" {
-		md["Content-Type"] = po.ContentType
-	}
 	// Conditional on the ETag of the upload: it fails instead of touching an
 	// object that someone else replaced in between.
-	_, err = f.mc.ComposeObject(ctx,
+	return f.serverCopy(ctx,
 		minio.CopyDestOptions{Bucket: f.bucket, Object: key, UserMetadata: md, ReplaceMetadata: true},
-		minio.CopySrcOptions{Bucket: f.bucket, Object: key, MatchETag: strings.Trim(ui.ETag, `"`)})
-	if err != nil {
-		f.abortUpload(ctx, key) // a multipart copy is never aborted by the library
+		minio.CopySrcOptions{Bucket: f.bucket, Object: key, MatchETag: strings.Trim(ui.ETag, `"`)},
+		hr.n)
+}
+
+// serverCopy copies the object src, of size bytes, to dst on the server. Above
+// maxCopyObject dst has to replace the metadata, or it is lost.
+//
+// Up to maxCopyObject it is one CopyObject request. ComposeObject is not used
+// there: it copies every non-empty object as a multipart upload (its one-request
+// shortcut needs a source option that its own validation rejects), which loses
+// the Content-Type.
+func (f *fs) serverCopy(ctx context.Context, dst minio.CopyDestOptions, src minio.CopySrcOptions, size int64) error {
+	if size <= maxCopyObject {
+		ui, err := f.mc.CopyObject(ctx, dst, src)
+		if err != nil {
+			return mapErr(err)
+		}
+		// S3 can answer a copy with 200 and an error in the body, which the
+		// library decodes as an empty result. Taking that for success would
+		// make Move delete the only copy.
+		if ui.ETag == "" {
+			return fmt.Errorf("s3: the server reported success for a copy but returned no result: %w", errServer)
+		}
+		return nil
+	}
+	if _, err := f.mc.ComposeObject(ctx, dst, src); err != nil {
+		f.abortUpload(ctx, dst.Object) // a multipart copy is never aborted by the library
 		return mapErr(err)
 	}
 	return nil
@@ -564,19 +548,25 @@ func (f *fs) transfer(ctx context.Context, from, to string, overwrite, move bool
 	return nil
 }
 
-// copyKey copies one object on the server, with its user metadata (the
-// Content-Type is not kept, see the package doc). A folder marker has no
-// content to copy and is created again.
+// copyKey copies one object on the server, with its headers and user
+// metadata. A folder marker has no content to copy and is created again.
 func (f *fs) copyKey(ctx context.Context, src, dst string) error {
 	if strings.HasSuffix(src, "/") {
 		_, err := f.mc.PutObject(ctx, f.bucket, dst, bytes.NewReader(nil), 0, minio.PutObjectOptions{})
 		return mapErr(err)
 	}
-	_, err := f.mc.ComposeObject(ctx,
-		minio.CopyDestOptions{Bucket: f.bucket, Object: dst},
-		minio.CopySrcOptions{Bucket: f.bucket, Object: src})
+	st, err := f.mc.StatObject(ctx, f.bucket, src, minio.StatObjectOptions{})
 	if err != nil {
-		f.abortUpload(ctx, dst) // a multipart copy is never aborted by the library
+		return mapErr(err)
 	}
-	return mapErr(err)
+	do := minio.CopyDestOptions{Bucket: f.bucket, Object: dst}
+	so := minio.CopySrcOptions{Bucket: f.bucket, Object: src}
+	// The server keeps the metadata of a one-request copy, except that MinIO
+	// loses Expires; a multipart copy starts a new object. In both cases hand
+	// over what the source has, on condition that it is still the same.
+	if !st.Expires.IsZero() || st.Size > maxCopyObject {
+		do.UserMetadata, do.ReplaceMetadata = storedMetadata(st, st.Size <= maxCopyObject), true
+		so.MatchETag = st.ETag
+	}
+	return f.serverCopy(ctx, do, so, st.Size)
 }

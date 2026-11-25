@@ -27,9 +27,9 @@ Status and code are what the server returned.
 |---|---|---|
 | Single PUT, `If-None-Match: *`, key exists | `PutObject` 10 B with `SetMatchETagExcept("*")` | **412** `PreconditionFailed` |
 | Same, key missing | same | ok |
-| 20 MiB (multipart) with `If-None-Match: *`, key exists | `PutObject` 20 MiB with the option set | **412** `PreconditionFailed`: minio-go puts the header on `CreateMultipartUpload`, and MinIO honours it there |
+| 20 MiB (multipart) with `If-None-Match: *`, key exists | `PutObject` 20 MiB with the option set | **412** `PreconditionFailed`: minio-go puts the header on `CreateMultipartUpload`, and MinIO honours it there. `drivers/s3` does not send it for multipart uploads |
 | `NewMultipartUpload` with `If-None-Match: *`, key exists | `core.NewMultipartUpload` | 412 `PreconditionFailed` |
-| `CompleteMultipartUpload` with `If-None-Match: *` passed in opts, key exists | `core.CompleteMultipartUpload(..., opts)` | 412 `PreconditionFailed`, object unchanged (10 B). So with minio-go 7.0.84 the header on completion is **honoured by MinIO** when the caller passes it; the high-level `PutObject` cannot send it on completion (see `drivers/s3` doc). Completion without the header: not run against an existing key |
+| `CompleteMultipartUpload` with `If-None-Match: *` passed in opts, key exists | `core.CompleteMultipartUpload(..., opts)` | 412 `PreconditionFailed`, object unchanged (10 B). So with minio-go 7.0.84 the header on completion is **honoured by MinIO** when the caller passes it; the high-level `PutObject` cannot send it on completion, so `drivers/s3` sends the header on single PUTs only (see its package doc). Completion without the header: not run against an existing key |
 | Ranged GET at/after the end | object of 10 B, `GetObject` with `SetRange` | `10-` and `10-20` and `11-12`: **416** `InvalidRange`; `5-100`: ok, 5 bytes (end is clamped) |
 | Copy onto itself, no change | `CopyObject` src == dst | **400** `InvalidRequest` ("trying to copy an object to itself without changing the object's metadata...") |
 | Copy onto itself, `REPLACE` metadata | `ReplaceMetadata: true`, one user key | ok |
@@ -42,5 +42,14 @@ Status and code are what the server returned.
 | Checksum | `PutObject` with `Checksum: ChecksumCRC32C` | 400 `InvalidArgument` ("Checksum requires Client with TrailingHeaders enabled") unless the client is created with `TrailingHeaders: true`; then ok and `StatObject(Checksum: true)` returns `ChecksumCRC32C`. An object put without a checksum has none on Stat; the ETag is the MD5 for single PUTs |
 | Incomplete multipart listing | `core.ListMultipartUploads` with prefixes `inc2/dir`, `inc2/dir/`, `inc2/`, `inc2/di`, with and without delimiter `/`, two open uploads under `inc2/` | **empty for every non-empty prefix**; with the empty prefix all open uploads of the bucket are listed (no common prefixes even with a delimiter). In an earlier probe run, `ListIncompleteUploads` through minio-go, with uploads opened under `inc/` (`inc/dir/a`, `inc/dir2/b`), was likewise empty for prefixes `inc/dir`, `inc/dir/`, `inc/` |
 
-Not run: multipart completion without `If-None-Match` over an existing key (assumed to overwrite, as in S3); anything over
+Seen through the gated tests of `drivers/s3` on 2026-11-25, same image and library:
+
+| Topic | Result |
+|---|---|
+| `PutObject` whose source reports an error before its last byte (single PUT and multipart) | fails; an existing object under the key is unchanged |
+| `ComposeObject` with one whole source | a multipart copy for every non-empty object, which loses `Content-Type`; `drivers/s3` uses `CopyObject` up to 5 GiB |
+| `CopyObject` keeping the source's metadata | `Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Content-Language` and user metadata kept, `Expires` **lost** (kept when the copy replaces the metadata) |
+| Non-ASCII user metadata value | returned as an RFC 2047 encoded word (`=?UTF-8?q?...?=`) |
+
+Not run: a copy of an object above 5 GiB (the multipart copy runs with the limit lowered); anything over
 TLS; versioned buckets; checksum behaviour of multipart uploads.

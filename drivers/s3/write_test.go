@@ -9,12 +9,16 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"mime"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -842,4 +846,597 @@ func (c *cancelAfter) Read(b []byte) (int, error) {
 		c.cancel()
 	}
 	return len(b), nil
+}
+
+// patterned returns n bytes that differ from one seed to the next.
+func patterned(n int, seed int64) []byte {
+	b := make([]byte, n)
+	rand.New(rand.NewSource(seed)).Read(b)
+	return b
+}
+
+// keeps asserts that p still holds old, with the hash recorded for it.
+func keeps(t *testing.T, fsys files.FS, p string, old []byte) {
+	t.Helper()
+	if got := readAll(t, fsys, p); !bytes.Equal(got, old) {
+		t.Fatalf("%s: previous object changed: %d bytes", p, len(got))
+	}
+	if got, err := fsys.(files.Hasher).SHA256(context.Background(), p); err != nil || got != hexSHA(old) {
+		t.Fatalf("%s: previous hash = %q, %v", p, got, err)
+	}
+}
+
+// A source longer than declared must not touch the object it was to replace.
+func TestOverLongOverwriteKeepsPreviousReal(t *testing.T) {
+	fsys, _, _ := openReal(t)
+	ctx := context.Background()
+	old := []byte("the only copy of the original")
+	for _, size := range []int{0, 5, 1 << 20, 8 << 20, 9 << 20, 16 << 20, 20 << 20} {
+		for _, extra := range []int{1, 10} {
+			p := fmt.Sprintf("/o-%d-%d.bin", size, extra)
+			if err := writeBytes(t, fsys, p, old, files.WriteOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			src := bytes.NewReader(patterned(size+extra, 1))
+			err := fsys.Write(ctx, p, src, files.WriteOptions{Size: int64(size), Overwrite: true})
+			if !errors.Is(err, odraz.ErrInvalidPath) || !strings.Contains(err.Error(), "longer than the declared") {
+				t.Fatalf("size %d+%d: err = %v", size, extra, err)
+			}
+			keeps(t, fsys, p, old)
+		}
+		// The exact length succeeds.
+		p := fmt.Sprintf("/exact-%d.bin", size)
+		data := patterned(size, 2)
+		if err := writeBytes(t, fsys, p, data, files.WriteOptions{}); err != nil {
+			t.Fatalf("exact %d: %v", size, err)
+		}
+		keeps(t, fsys, p, data)
+	}
+}
+
+func TestOverCapOverwriteKeepsPreviousReal(t *testing.T) {
+	fsys, _, _ := openReal(t)
+	defer s3.SetUnknownSizeLimits(5<<20, 15<<20)()
+	ctx := context.Background()
+	old := []byte("the only copy of the original")
+	if err := writeBytes(t, fsys, "/cap.bin", old, files.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, extra := range []int{1, 5 << 20} {
+		err := fsys.Write(ctx, "/cap.bin", bytes.NewReader(patterned(15<<20+extra, 3)), files.WriteOptions{Size: -1, Overwrite: true})
+		if !errors.Is(err, odraz.ErrUnsupported) || !strings.Contains(err.Error(), "maximum") {
+			t.Fatalf("+%d: err = %v", extra, err)
+		}
+		keeps(t, fsys, "/cap.bin", old)
+	}
+	for _, size := range []int{15<<20 - 1, 15 << 20} {
+		data := patterned(size, 4)
+		if err := fsys.Write(ctx, "/cap.bin", bytes.NewReader(data), files.WriteOptions{Size: -1, Overwrite: true}); err != nil {
+			t.Fatalf("%d: %v", size, err)
+		}
+		keeps(t, fsys, "/cap.bin", data)
+	}
+}
+
+// failAfter yields n bytes and then fails with err.
+type failAfter struct {
+	n   int
+	err error
+}
+
+func (r *failAfter) Read(b []byte) (int, error) {
+	if r.n == 0 {
+		return 0, r.err
+	}
+	if len(b) > r.n {
+		b = b[:r.n]
+	}
+	r.n -= len(b)
+	return len(b), nil
+}
+
+// A source that fails, also with io.ErrUnexpectedEOF (what a truncated HTTP
+// body gives), or ends early must never be stored cut off.
+func TestFailedSourceKeepsPreviousReal(t *testing.T) {
+	fsys, _, _ := openReal(t)
+	defer s3.SetUnknownSizeLimits(5<<20, 15<<20)()
+	ctx := context.Background()
+	old := []byte("the only copy of the original")
+	if err := writeBytes(t, fsys, "/f.bin", old, files.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("boom")
+	for _, srcErr := range []error{boom, io.ErrUnexpectedEOF} {
+		for _, n := range []int{100, 5 << 20, 7 << 20} {
+			for _, size := range []int64{-1, int64(n) + 100, 17 << 20} {
+				err := fsys.Write(ctx, "/f.bin", &failAfter{n, srcErr}, files.WriteOptions{Size: size, Overwrite: true})
+				if !errors.Is(err, srcErr) {
+					t.Fatalf("%v after %d, size %d: err = %v", srcErr, n, size, err)
+				}
+				keeps(t, fsys, "/f.bin", old)
+			}
+		}
+	}
+	for _, size := range []int64{100, 9 << 20, 17 << 20} {
+		if err := fsys.Write(ctx, "/f.bin", bytes.NewReader(make([]byte, size-1)), files.WriteOptions{Size: size, Overwrite: true}); err == nil {
+			t.Fatalf("short source, size %d: no error", size)
+		}
+		keeps(t, fsys, "/f.bin", old)
+	}
+}
+
+// recorder stands in front of the fake. It keeps the headers of every request,
+// makes the fake look like a server that honours If-None-Match on the probe,
+// and answers server-side copies (which the fake rejects) with copyBody.
+type recorder struct {
+	mu         sync.Mutex
+	reqs       []*http.Request
+	copyBody   string
+	failDelete bool
+}
+
+const copyOK = `<CopyObjectResult><ETag>"d41d8cd98f00b204e9800998ecf8427e"</ETag><LastModified>2026-01-02T03:04:05.000Z</LastModified></CopyObjectResult>`
+
+func newRecorder(t *testing.T) (*recorder, string) {
+	t.Helper()
+	rec := &recorder{copyBody: copyOK}
+	next := fakeHandler()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.mu.Lock()
+		rec.reqs = append(rec.reqs, r.Clone(context.Background()))
+		body, failDelete := rec.copyBody, rec.failDelete
+		rec.mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+			io.WriteString(w, body)
+		case r.Method == http.MethodPut && r.Header.Get("If-None-Match") == "*" && strings.Contains(r.URL.Path, "probe-"):
+			w.WriteHeader(http.StatusPreconditionFailed)
+			io.WriteString(w, `<Error><Code>PreconditionFailed</Code></Error>`)
+		case r.Method == http.MethodDelete && failDelete:
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `<Error><Code>AccessDenied</Code></Error>`)
+		default:
+			w.Header().Del("Content-Type")
+			next.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return rec, srv.URL
+}
+
+func (rec *recorder) matching(f func(*http.Request) bool) (out []*http.Request) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, r := range rec.reqs {
+		if f(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestConditionalHeaderOnlyOnSinglePut(t *testing.T) {
+	rec, ep := newRecorder(t)
+	fsys, _ := openFSAt(t, ep, "")
+	for _, tc := range []struct {
+		name      string
+		size      int
+		unknown   bool
+		multipart bool
+	}{
+		{"small", 100, false, false},
+		{"streamed-single", 9 << 20, false, false},
+		{"largest-single", 16 << 20, false, false},
+		{"multipart", 16<<20 + 1, false, true},
+		{"unknown", 100, true, true},
+	} {
+		size := int64(tc.size)
+		if tc.unknown {
+			size = -1
+		}
+		if err := fsys.Write(context.Background(), "/"+tc.name, bytes.NewReader(make([]byte, tc.size)), files.WriteOptions{Size: size}); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		reqs := rec.matching(func(r *http.Request) bool {
+			return r.URL.Path == "/"+fakeBucket+"/"+tc.name && r.Header.Get("X-Amz-Copy-Source") == "" &&
+				(r.Method == http.MethodPut || r.Method == http.MethodPost)
+		})
+		multipart := false
+		conditional := 0
+		for _, r := range reqs {
+			multipart = multipart || r.URL.Query().Has("uploads")
+			if r.Header.Get("If-None-Match") != "" {
+				conditional++
+			}
+		}
+		want := 1
+		if tc.multipart {
+			want = 0
+		}
+		if len(reqs) == 0 || multipart != tc.multipart || conditional != want {
+			t.Fatalf("%s: %d upload requests, multipart %v, %d conditional (want %d)", tc.name, len(reqs), multipart, conditional, want)
+		}
+	}
+}
+
+// CopyObject can answer 200 with an error in the body (AWS documents this).
+// That must not count as a copy: Move would delete the only object.
+func TestCopyErrorInSuccessResponseKeepsSource(t *testing.T) {
+	rec, ep := newRecorder(t)
+	fsys, mc := openFSAt(t, ep, "")
+	put(t, mc, "src.txt", []byte("precious"))
+	rec.mu.Lock()
+	rec.copyBody = `<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code><Message>try again</Message></Error>`
+	rec.mu.Unlock()
+	if err := fsys.Move(context.Background(), "/src.txt", "/dst.txt", false); err == nil {
+		t.Error("move reported success")
+	}
+	keepsBytes := readAll(t, fsys, "/src.txt")
+	if string(keepsBytes) != "precious" {
+		t.Fatalf("source = %q", keepsBytes)
+	}
+	if err := fsys.Write(context.Background(), "/big", bytes.NewReader(make([]byte, 9<<20)), files.WriteOptions{Size: 9 << 20}); err == nil {
+		t.Error("write reported success although the self-copy failed")
+	}
+}
+
+var stdHeaders = map[string]string{
+	"content-TYPE":        "image/x-custom",
+	"Cache-Control":       "max-age=60",
+	"content-disposition": `attachment; filename="a.bin"`,
+	"Content-Encoding":    "identity",
+	"CONTENT-LANGUAGE":    "de",
+	"Expires":             "Wed, 21 Oct 2037 07:28:00 GMT",
+}
+
+// checkHeaders asserts the stored headers, user metadata and hash of key.
+func checkHeaders(t *testing.T, fsys files.FS, mc *minio.Client, bucket, prefix, p string, data []byte) {
+	t.Helper()
+	ctx := context.Background()
+	e, err := fsys.Stat(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := prefix + p
+	st, err := mc.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		t.Fatalf("%s: stat %q: %v", p, key, err)
+	}
+	for k, want := range stdHeaders {
+		got := st.Metadata.Get(k)
+		if http.CanonicalHeaderKey(k) == "Expires" {
+			if !st.Expires.IsZero() {
+				got = st.Expires.UTC().Format(http.TimeFormat)
+			}
+		}
+		if got != want {
+			t.Errorf("%s: %s = %q, want %q", p, k, got, want)
+		}
+	}
+	if e.MimeType != "image/x-custom" {
+		t.Errorf("%s: MimeType = %q", p, e.MimeType)
+	}
+	if st.UserMetadata["Source"] != "camera" {
+		t.Errorf("%s: user metadata = %v", p, st.UserMetadata)
+	}
+	if got, err := fsys.(files.Hasher).SHA256(ctx, p); err != nil || got != hexSHA(data) {
+		t.Errorf("%s: sha256 = %q, %v", p, got, err)
+	}
+}
+
+// drivePrefix finds the random key prefix of a drive of openReal by writing an
+// object and looking for it.
+func drivePrefix(t *testing.T, fsys files.FS, mc *minio.Client, bucket string) string {
+	t.Helper()
+	name := fmt.Sprintf("/where-am-i-%d", rand.Int63())
+	if err := writeBytes(t, fsys, name, []byte("x"), files.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for o := range mc.ListObjects(context.Background(), bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if o.Err != nil {
+			t.Fatal(o.Err)
+		}
+		if p, ok := strings.CutSuffix(o.Key, name); ok {
+			return p
+		}
+	}
+	t.Fatal("drive prefix not found")
+	return ""
+}
+
+func headerMeta() map[string]string {
+	m := map[string]string{"Source": "camera"}
+	for k, v := range stdHeaders {
+		m[k] = v
+	}
+	return m
+}
+
+func TestStandardHeaderMetadataReal(t *testing.T) {
+	fsys, mc, bucket := openReal(t)
+	ctx := context.Background()
+	prefix := drivePrefix(t, fsys, mc, bucket)
+	for _, tc := range []struct {
+		name    string
+		size    int
+		unknown bool
+	}{{"h-small", 100, false}, {"h-single", 9 << 20, false}, {"h-multi", 20 << 20, false}, {"h-unknown", 9 << 20, true}} {
+		data := patterned(tc.size, 5)
+		size := int64(tc.size)
+		if tc.unknown {
+			size = -1
+		}
+		p := "/" + tc.name
+		if err := fsys.Write(ctx, p, bytes.NewReader(data), files.WriteOptions{Size: size, Metadata: headerMeta()}); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		checkHeaders(t, fsys, mc, bucket, prefix, p, data)
+		if err := fsys.(files.Copier).Copy(ctx, p, p+"-copy", false); err != nil {
+			t.Fatalf("%s copy: %v", tc.name, err)
+		}
+		checkHeaders(t, fsys, mc, bucket, prefix, p+"-copy", data)
+		if err := fsys.Move(ctx, p+"-copy", p+"-moved", false); err != nil {
+			t.Fatalf("%s move: %v", tc.name, err)
+		}
+		checkHeaders(t, fsys, mc, bucket, prefix, p+"-moved", data)
+	}
+}
+
+// Content-Type from the file name, with no metadata from the caller, survives
+// the large-upload self-copy, Copy, Move and a folder copy.
+func TestCopyKeepsContentTypeReal(t *testing.T) {
+	fsys, _, _ := openReal(t)
+	ctx := context.Background()
+	if err := fsys.Mkdir(ctx, "/d"); err != nil {
+		t.Fatal(err)
+	}
+	is := func(p string) {
+		t.Helper()
+		if e, err := fsys.Stat(ctx, p); err != nil || e.MimeType != "image/png" {
+			t.Errorf("%s: MimeType = %q, %v", p, e.MimeType, err)
+		}
+	}
+	for _, size := range []int{10, 9 << 20, 20 << 20} {
+		name := fmt.Sprintf("%d.png", size)
+		data := patterned(size, 6)
+		if err := writeBytes(t, fsys, "/d/"+name, data, files.WriteOptions{Metadata: map[string]string{"k": "v"}}); err != nil {
+			t.Fatal(err)
+		}
+		is("/d/" + name)
+		cp := "/c-" + name + ".bin"
+		if err := fsys.(files.Copier).Copy(ctx, "/d/"+name, cp, false); err != nil {
+			t.Fatal(err)
+		}
+		is(cp)
+		if err := fsys.Move(ctx, cp, cp+".moved", false); err != nil {
+			t.Fatal(err)
+		}
+		is(cp + ".moved")
+		keeps(t, fsys, cp+".moved", data)
+	}
+	if err := fsys.(files.Copier).Copy(ctx, "/d", "/d2", false); err != nil {
+		t.Fatal(err)
+	}
+	is("/d2/10.png")
+	is("/d2/20971520.png")
+}
+
+func TestMetadataWithControlCharactersIsInvalid(t *testing.T) {
+	fsys, _ := openFS(t, "")
+	for _, key := range []string{"note", "Cache-Control", "Content-Type", "Content-Disposition", "Content-Encoding", "Content-Language", "Expires"} {
+		for _, v := range []string{"a\rb", "a\nb", "a\r\nX-Injected: 1", "a\x00b"} {
+			err := writeBytes(t, fsys, "/m", []byte("x"), files.WriteOptions{Metadata: map[string]string{key: v}})
+			if !errors.Is(err, odraz.ErrInvalidPath) || !strings.Contains(err.Error(), "metadata") || strings.Contains(err.Error(), "server error") {
+				t.Fatalf("%s %q: err = %v", key, v, err)
+			}
+			absent(t, fsys, "/m")
+		}
+	}
+	for _, md := range []map[string]string{{"bad name": "v"}, {"x-minio-thing": "v"}, {"Expires": "tomorrow"}} {
+		err := writeBytes(t, fsys, "/m", []byte("x"), files.WriteOptions{Metadata: md})
+		if !errors.Is(err, odraz.ErrInvalidPath) || !strings.Contains(err.Error(), "metadata") {
+			t.Fatalf("%v: err = %v", md, err)
+		}
+		absent(t, fsys, "/m")
+	}
+}
+
+func TestProbeKeyUnderOdrazFolder(t *testing.T) {
+	for _, failDelete := range []bool{false, true} {
+		rec, ep := newRecorder(t)
+		rec.failDelete = failDelete
+		fsys, _ := openFSAt(t, ep, "pre")
+		if err := writeBytes(t, fsys, "/a", []byte("x"), files.WriteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		probes := rec.matching(func(r *http.Request) bool { return strings.Contains(r.URL.Path, "probe-") })
+		if len(probes) == 0 {
+			t.Fatal("no probe")
+		}
+		for _, r := range probes {
+			if !strings.HasPrefix(r.URL.Path, "/"+fakeBucket+"/pre/.odraz/probe-") {
+				t.Fatalf("probe key %s", r.URL.Path)
+			}
+		}
+		root, err := fsys.List(context.Background(), "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range root {
+			names = append(names, e.Name)
+		}
+		want := "a"
+		if failDelete {
+			want = ".odraz,a"
+		}
+		if got := strings.Join(names, ","); got != want {
+			t.Fatalf("failDelete %v: root = %s, want %s", failDelete, got, want)
+		}
+	}
+}
+
+// A source of unknown size that fails once with io.ErrUnexpectedEOF and then
+// reports io.EOF must not be taken for a complete stream.
+func TestTruncatedSourceIsNotStored(t *testing.T) {
+	fsys, _ := openFS(t, "")
+	src := io.MultiReader(strings.NewReader("half"), &failOnce{})
+	err := fsys.Write(context.Background(), "/t", src, files.WriteOptions{Size: -1})
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("err = %v", err)
+	}
+	absent(t, fsys, "/t")
+}
+
+type failOnce struct{ done bool }
+
+func (r *failOnce) Read([]byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return 0, io.ErrUnexpectedEOF
+}
+
+// Above maxCopyObject the copy is multipart: it has to carry the headers and
+// metadata over itself.
+func TestMultipartCopyKeepsHeadersReal(t *testing.T) {
+	fsys, mc, bucket := openReal(t)
+	defer s3.SetMaxCopyObject(1 << 20)()
+	ctx := context.Background()
+	prefix := drivePrefix(t, fsys, mc, bucket)
+	data := patterned(9<<20, 7)
+	if err := writeBytes(t, fsys, "/big", data, files.WriteOptions{Metadata: headerMeta()}); err != nil {
+		t.Fatal(err)
+	}
+	checkHeaders(t, fsys, mc, bucket, prefix, "/big", data)
+	if err := fsys.(files.Copier).Copy(ctx, "/big", "/big-copy", false); err != nil {
+		t.Fatal(err)
+	}
+	checkHeaders(t, fsys, mc, bucket, prefix, "/big-copy", data)
+	st, err := mc.StatObject(ctx, bucket, prefix+"/big-copy", minio.StatObjectOptions{})
+	if err != nil || !strings.HasSuffix(st.ETag, "-1") {
+		t.Fatalf("not a multipart copy: etag %q, %v", st.ETag, err)
+	}
+}
+
+// Both copies of a large write: the second one is conditional on the ETag of
+// the first and replaces the metadata.
+func TestSelfCopyIsConditional(t *testing.T) {
+	rec, ep := newRecorder(t)
+	fsys, _ := openFSAt(t, ep, "")
+	if err := writeBytes(t, fsys, "/big", make([]byte, 9<<20), files.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	copies := rec.matching(func(r *http.Request) bool { return r.Header.Get("X-Amz-Copy-Source") != "" })
+	if len(copies) != 1 {
+		t.Fatalf("%d copy requests", len(copies))
+	}
+	h := copies[0].Header
+	if h.Get("X-Amz-Copy-Source-If-Match") == "" || h.Get("X-Amz-Metadata-Directive") != "REPLACE" ||
+		h.Get("Content-Type") != "application/octet-stream" || h.Get("X-Amz-Meta-Odraz-Sha256") == "" ||
+		h.Get("X-Amz-Meta-X-Amz-Checksum-Algorithm") != "" || h.Get("X-Amz-Checksum-Algorithm") != "" {
+		t.Fatalf("headers = %v", h)
+	}
+}
+
+// What the package doc says about reading at the end and about metadata that is
+// not ASCII.
+func TestDocumentedBehaviourReal(t *testing.T) {
+	fsys, mc, bucket := openReal(t)
+	ctx := context.Background()
+	prefix := drivePrefix(t, fsys, mc, bucket)
+	if err := writeBytes(t, fsys, "/empty", nil, files.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBytes(t, fsys, "/ten", []byte("0123456789"), files.WriteOptions{Metadata: map[string]string{"place": "Köln 日本"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		p        string
+		off, n   int64
+		fails    bool
+		wantSize int
+	}{
+		{"/empty", 0, -1, false, 0}, {"/empty", 0, 0, false, 0}, {"/empty", 0, 1, true, 0}, {"/empty", 1, -1, true, 0},
+		{"/ten", 10, -1, true, 0}, {"/ten", 11, -1, true, 0}, {"/ten", 10, 5, true, 0}, {"/ten", 5, 100, false, 5}, {"/ten", 10, 0, false, 0},
+	} {
+		var b []byte
+		r, err := fsys.Read(ctx, tc.p, tc.off, tc.n)
+		if err == nil {
+			b, err = io.ReadAll(r)
+			r.Close()
+		}
+		if (err != nil) != tc.fails || len(b) != tc.wantSize {
+			t.Errorf("%s offset %d length %d: %d bytes, %v", tc.p, tc.off, tc.n, len(b), err)
+		}
+	}
+	st, err := mc.StatObject(ctx, bucket, prefix+"/ten", minio.StatObjectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := st.UserMetadata["Place"]
+	dec, err := new(mime.WordDecoder).DecodeHeader(got)
+	t.Logf("stored form of a non-ASCII value: %q", got)
+	if !strings.HasPrefix(strings.ToLower(got), "=?utf-8?") || err != nil || dec != "Köln 日本" {
+		t.Errorf("value = %q (decoded %q, %v)", got, dec, err)
+	}
+}
+
+func TestStandardHeaderMetadataSmallPut(t *testing.T) {
+	rec, ep := newRecorder(t)
+	fsys, _ := openFSAt(t, ep, "")
+	md := map[string]string{"content-type": "image/x-custom", "CACHE-CONTROL": "max-age=60", "x-amz-meta-Content-Language": "de", "Source": "camera"}
+	if err := writeBytes(t, fsys, "/h.png", []byte("x"), files.WriteOptions{Metadata: md}); err != nil {
+		t.Fatal(err)
+	}
+	puts := rec.matching(func(r *http.Request) bool { return r.Method == http.MethodPut && r.URL.Path == "/"+fakeBucket+"/h.png" })
+	if len(puts) != 1 {
+		t.Fatalf("%d puts", len(puts))
+	}
+	h := puts[0].Header
+	if h.Get("Content-Type") != "image/x-custom" || h.Get("Cache-Control") != "max-age=60" || h.Get("Content-Language") != "de" ||
+		h.Get("X-Amz-Meta-Source") != "camera" || h.Get("X-Amz-Meta-Cache-Control") != "" {
+		t.Fatalf("headers = %v", h)
+	}
+}
+
+// A copy that has to set the metadata again (an object with Expires, or above
+// maxCopyObject) keeps another tool's user metadata, also under names of
+// standard headers, and values that are not ASCII.
+func TestReplacingCopyKeepsForeignMetadataReal(t *testing.T) {
+	fsys, mc, bucket := openReal(t)
+	ctx := context.Background()
+	prefix := drivePrefix(t, fsys, mc, bucket)
+	expires := time.Date(2037, 10, 21, 7, 28, 0, 0, time.UTC)
+	_, err := mc.PutObject(ctx, bucket, prefix+"/foreign", strings.NewReader("data"), 4, minio.PutObjectOptions{
+		ContentType: "text/x-real", CacheControl: "no-store", Expires: expires,
+		UserMetadata: map[string]string{
+			"x-amz-meta-content-type": "meta-type", "x-amz-meta-cache-control": "meta-cache",
+			"Place": "Köln", "Odraz-Sha256": hexSHA([]byte("data")) + ":4",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []int64{5 << 30, 1} { // one request, then multipart
+		func() {
+			defer s3.SetMaxCopyObject(limit)()
+			p := fmt.Sprintf("/copy-%d", limit)
+			if err := fsys.(files.Copier).Copy(ctx, "/foreign", p, false); err != nil {
+				t.Fatalf("limit %d: %v", limit, err)
+			}
+			st, err := mc.StatObject(ctx, bucket, prefix+p, minio.StatObjectOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			place, _ := new(mime.WordDecoder).DecodeHeader(st.UserMetadata["Place"])
+			if st.ContentType != "text/x-real" || st.Metadata.Get("Cache-Control") != "no-store" || !st.Expires.Equal(expires) ||
+				st.UserMetadata["Content-Type"] != "meta-type" || st.UserMetadata["Cache-Control"] != "meta-cache" || place != "Köln" {
+				t.Errorf("limit %d: %q %v %v %q", limit, st.ContentType, st.Metadata, st.UserMetadata, place)
+			}
+			keeps(t, fsys, p, []byte("data"))
+		}()
+	}
 }
