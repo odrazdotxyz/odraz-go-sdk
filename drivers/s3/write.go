@@ -196,14 +196,14 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 			return fmt.Errorf("s3: %s: %w", p, odraz.ErrExists)
 		}
 	case errors.Is(err, odraz.ErrNotFound):
-		// Not there yet. Where the server supports it a single-PUT upload
-		// (known size up to the size minio-go sends in one request, 16 MiB)
-		// also carries If-None-Match: * and a writer that got in between makes
-		// it fail with 412 (ErrExists). Multipart and unknown-size uploads
-		// are NOT conditional (the library cannot make the completion
-		// conditional): only the Stat above guards them, and two concurrent
-		// writers of one key can both succeed. The same holds on servers that
-		// ignore the header.
+		// Not there yet. Where the server supports it the upload also carries
+		// If-None-Match: *. A single-PUT upload (known size up to the size minio-go
+		// sends in one request, 16 MiB) is checked on the put, so a writer that got
+		// in between makes it fail with 412 (ErrExists). A multipart upload (known
+		// size above that, or unknown size) sends the header when it is initiated
+		// but not on completion (the high-level PutObject cannot send it there), so
+		// two writers whose uploads overlap in time can both succeed. On servers
+		// that ignore the header only the Stat above guards any upload.
 		cond = !opts.Overwrite && f.conditionalPut(ctx)
 	default:
 		return err

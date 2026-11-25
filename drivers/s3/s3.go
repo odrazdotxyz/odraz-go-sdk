@@ -31,17 +31,21 @@
 // every missing parent. Write needs an existing parent (a marker or any key
 // below it; the root always exists) and, without Overwrite, fails with
 // ErrExists after a Stat. Where the server honours "If-None-Match: *" (probed
-// once per drive) a single-PUT upload (known size up to what minio-go sends in
-// one request, 16 MiB) is also conditional, which closes the race with a
-// concurrent writer. Multipart and unknown-size uploads are NOT conditional:
-// only the Stat guards them, and two concurrent writers of one key can both
-// succeed. Uploads stream: a source of unknown size goes up in 8 MiB parts
-// and may not exceed 8 MiB x 10,000 parts (about 78 GiB); a longer one fails
-// with ErrUnsupported and nothing is kept. A source longer than the declared
-// Size fails with ErrInvalidPath and nothing is kept. Delete removes the keys
-// under a folder in batches of 1,000. Move is a server-side copy followed by a
-// delete, so it is not atomic and a failure half way can leave both copies; a
-// folder is copied key by key.
+// once per drive) such a Write also sends that header. For a single-PUT upload
+// (known size up to what minio-go sends in one request, 16 MiB) the server
+// enforces it on the put, which closes the race with a concurrent writer. For
+// multipart uploads (known size above 16 MiB, and every upload of unknown size)
+// it is sent when the upload is initiated but NOT on completion (the high-level
+// PutObject cannot send it there): the server checks it when the upload starts,
+// so two writers whose uploads overlap in time can both succeed. On servers
+// that ignore the header only the Stat guards any upload. Uploads stream: a
+// source of unknown size goes up in 8 MiB parts and may not exceed 8 MiB x
+// 10,000 parts (about 78 GiB); a longer one fails with ErrUnsupported and
+// nothing is kept. A source longer than the declared Size fails with
+// ErrInvalidPath and nothing is kept. Delete removes the keys under a folder
+// in batches of 1,000. Move is a server-side copy followed by a delete, so it
+// is not atomic and a failure half way can leave both copies; a folder is
+// copied key by key.
 //
 // Failed or cancelled uploads are aborted best effort (RemoveIncompleteUpload
 // with a context that is not cancelled), but a crash can leave incomplete
