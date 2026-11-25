@@ -1,71 +1,151 @@
 // Package s3 is the S3-compatible object storage adapter for the files
-// domain (AWS S3, MinIO, Ceph, Backblaze B2, Cloudflare R2, ...). Import it for
-// its side effect: it registers the "s3" adapter.
+// domain. Import it for its side effect: it registers the "s3" adapter.
 //
-// An account is one bucket, optionally restricted to a key prefix. The access
-// key id and secret access key live in the SecretStore (accounts.SecretUsername
-// and accounts.SecretPassword); everything else is in Account.Config:
+// # Account
 //
-//	endpoint    optional URL or host:port of an S3-compatible server; empty means AWS.
-//	            Without a scheme https is assumed.
+// An account is one bucket, optionally restricted to a key prefix, and has one
+// drive (id [DriveID]). The access key id and secret access key live in the
+// SecretStore (accounts.SecretUsername and accounts.SecretPassword); everything
+// else is in Account.Config:
+//
+//	endpoint    optional URL of an S3-compatible server; empty means AWS.
+//	            accounts.Configure requires http:// or https://; a bare
+//	            host:port set directly in Config is taken as https.
+//	            No path or query.
 //	region      default us-east-1
 //	bucket      required
-//	prefix      optional folder inside the bucket, no leading slash
+//	prefix      optional folder inside the bucket (outer slashes are ignored)
 //	path_style  "true" for path-style addressing; implied when endpoint is set
 //	            unless this is "false"
 //
-// Testing: the in-process fake cannot store folder markers, so the conformance
-// suite (TestConformanceMinIO) and the other *Real tests need a real server. Run
-// eval "$(testenv/minio/seed.sh)" and then go test ./drivers/s3/ -run MinIO; see
-// testenv/minio/README.md for the behaviour observed there. Without the
-// ODRAZ_TEST_S3_* variables those tests skip.
+// The common proxy fields work too (extra headers, client certificate,
+// insecure_skip_verify). Extra headers are added after the request is signed, so
+// they must not replace headers S3 signs (such as Authorization or Host). Unlike
+// the WebDAV based adapters this one does not detect auth proxies: it never
+// returns ErrBlockedByProxy. Redirects are not followed by the HTTP client.
 //
-// Folders are virtual. A key ending in "/" is a folder marker; a path is a
-// folder if its marker exists or any key starts with "<key>/", and a file if
-// the exact key exists. If a key is both a file and a folder prefix, the file
-// wins: Stat returns it and List on it returns ErrInvalidPath. Listing a
-// folder gives the modification time of a folder only when it is not a common
-// prefix (Stat finds the marker's time; List returns the zero time).
+// Validate lists one key under the prefix, which proves the keys, the bucket and
+// list permission (AccessDenied there is ErrAuth). It does not prove read, write
+// or delete permission. The driver needs to list the bucket and to get, put and
+// delete objects; aborting failed uploads also needs the multipart list and abort
+// permissions.
 //
-// Writing: Mkdir creates a zero-byte marker object "<key>/" for the folder and
-// every missing parent. Write needs an existing parent (a marker or any key
-// below it; the root always exists) and, without Overwrite, fails with
-// ErrExists after a Stat. Where the server honours "If-None-Match: *" (probed
-// once per drive) such a Write also sends that header. For a single-PUT upload
-// (known size up to what minio-go sends in one request, 16 MiB) the server
-// enforces it on the put, which closes the race with a concurrent writer. For
-// multipart uploads (known size above 16 MiB, and every upload of unknown size)
-// it is sent when the upload is initiated but NOT on completion (the high-level
-// PutObject cannot send it there): the server checks it when the upload starts,
-// so two writers whose uploads overlap in time can both succeed. On servers
-// that ignore the header only the Stat guards any upload. Uploads stream: a
-// source of unknown size goes up in 8 MiB parts and may not exceed 8 MiB x
-// 10,000 parts (about 78 GiB); a longer one fails with ErrUnsupported and
-// nothing is kept. A source longer than the declared Size fails with
-// ErrInvalidPath and nothing is kept. Delete removes the keys under a folder
-// in batches of 1,000. Move is a server-side copy followed by a delete, so it
-// is not atomic and a failure half way can leave both copies; a folder is
-// copied key by key.
+// # Providers
+//
+// Only MinIO has been tested (the image pinned in testenv/minio, over plain HTTP
+// with path-style addressing and an unversioned bucket). Everything else below is
+// expected to work but UNTESTED; check endpoints and regions in the provider's
+// documentation.
+//
+//	MinIO           endpoint http(s)://host:port, path-style (the default)
+//	AWS S3          no endpoint, the bucket's region; untested
+//	Backblaze B2    endpoint https://s3.<region>.backblazeb2.com; untested
+//	Wasabi          endpoint https://s3.<region>.wasabisys.com; untested
+//	Cloudflare R2   endpoint https://<account id>.r2.cloudflarestorage.com,
+//	                region auto; untested
+//	Ceph and others their S3 endpoint; untested
+//
+// Points to check on an untested provider: multipart uploads ask for CRC32C
+// checksums; copies above about 524 MiB use parts whose sizes can differ by one
+// byte, while some services (R2 documents this) want equal parts; and the
+// conditional put described below may be ignored. On a versioned bucket (B2
+// buckets keep versions) deleted and replaced objects stay as old versions, and
+// every upload that is copied a second time leaves two.
+//
+// # Folders
+//
+// Folders are virtual. A key ending in "/" is a folder marker; a path is a folder
+// if its marker exists or any key starts with "<key>/", and a file if the exact
+// key exists. If a key is both a file and a folder prefix, the file wins: Stat
+// returns it and List on it returns ErrInvalidPath. Mkdir creates a zero-byte
+// marker object "<key>/" for the folder and every missing parent, so empty
+// folders persist (Capabilities still report no RealDirectories). A folder that
+// exists only because of the keys below it disappears with the last of them. List
+// returns the zero modification time for folders; Stat returns the marker's time
+// when the folder has a marker. List entries of files have no MimeType (Stat has
+// it). Keys with empty, "." or ".." segments, written by other tools, cannot be
+// addressed. Copy and Move recreate every key ending in "/" as an empty marker,
+// so data another tool stored under such a key is not carried over.
+//
+// # Reading
+//
+// Read supports ranges. Unlike the contract of the other adapters, an offset at
+// or past the end of a file (also any range of an empty file) is an error from
+// the returned reader (MinIO answers InvalidRange), not an empty result.
+//
+// # Writing
+//
+// Write needs an existing parent (a marker or any key below it; the root always
+// exists) and, without Overwrite, fails with ErrExists after a Stat. Where the
+// server honours "If-None-Match: *" such a Write also sends that header. This is
+// found out once per drive by writing and deleting a small ".odraz-probe-*" object
+// under the prefix (it remains if deleting is not permitted). For a single-PUT
+// upload (known size up to what minio-go sends in one request, 16 MiB) the server
+// enforces the header on the put, which closes the race with a concurrent writer.
+// For multipart uploads (known size above 16 MiB, and every upload of unknown
+// size) it is sent when the upload is initiated but NOT on completion (the
+// high-level PutObject cannot send it there): the server checks it when the upload
+// starts, so two writers whose uploads overlap in time can both succeed. On
+// servers that ignore the header only the Stat guards any upload.
+//
+// Uploads stream. A source of unknown size goes up in 8 MiB parts and may not
+// exceed 8 MiB x 10,000 parts (about 78 GiB); a longer one fails with
+// ErrUnsupported. A source longer than the declared Size fails with
+// ErrInvalidPath. In both cases nothing of the new content is kept, but for
+// uploads above 8 MiB or of unknown size the excess is only seen after the object
+// has been stored, and the object is then deleted: with Overwrite, THE PREVIOUS
+// OBJECT IS LOST. Progress counts bytes read from the source; it can reach the
+// total while the upload and the second copy (below) are still running.
+//
+// WriteOptions.Metadata becomes user metadata (x-amz-meta-*); the client library
+// sends keys that name standard headers, such as Cache-Control, as those headers.
+// Keys starting with "x-amz-" (after removing "x-amz-meta-") are dropped. The
+// files API cannot read metadata back.
 //
 // Failed or cancelled uploads are aborted best effort (RemoveIncompleteUpload
 // with a context that is not cancelled), but a crash can leave incomplete
 // multipart uploads behind, which are billed: give the bucket an
 // AbortIncompleteMultipartUpload lifecycle rule.
 //
-// SHA-256: Write records the whole object's hash as the user metadata
-// "odraz-sha256" with the value "<64 lowercase hex>:<size in bytes>" (S3's own
-// checksum of a multipart upload is only a composite), and files.Hasher
-// returns it. Callers cannot set that key through WriteOptions.Metadata; it is
+// # Delete, Move and Copy
+//
+// Delete removes the keys under a folder in batches of 1,000. Copy is a
+// server-side copy, key by key for a folder. Move is that copy followed by a
+// delete, so it is not atomic and a failure half way can leave both copies. When
+// a folder replaces or is replaced (overwrite), the target is deleted before the
+// copy starts. Copy and Move keep user metadata, including the stored SHA-256,
+// but NOT the Content-Type: a copied or moved non-empty file is
+// "application/octet-stream" afterwards (the library copies it as a multipart
+// upload), and its ETag changes.
+//
+// # SHA-256
+//
+// Write records the whole object's hash as the user metadata "odraz-sha256" with
+// the value "<64 lowercase hex>:<size in bytes>" (S3's own checksum of a
+// multipart upload is only a composite), and files.Hasher returns it. Only this
+// adapter sets it; a full-object S3 SHA-256 checksum stored by another tool is
+// accepted too. Callers cannot set the key through WriteOptions.Metadata; it is
 // dropped, also when spelled "X-Amz-Meta-Odraz-Sha256". SHA256 gives
-// ErrUnsupported when the key is missing or malformed, or when the size in it
-// differs from the object's current size (another tool rewrote the content and
-// kept the metadata); files.SHA256 then reads the object. LIMITATION: a
-// rewrite of the same length is not detected. The hash vouches for what this
-// driver wrote, and whoever must be sure has to verify by reading. A
-// full-object S3 SHA-256 checksum stored by another tool is accepted too.
-// Objects up to 8 MiB of known size are hashed in memory before the single
-// PUT; larger or unknown-size objects are streamed and then copied onto
-// themselves to add the metadata.
+// ErrUnsupported when there is neither, when the value is malformed, or when the
+// size in it differs from the object's current size (another tool rewrote the
+// content and kept the metadata); files.SHA256 then reads the object.
+// LIMITATION: a rewrite of the same length is not detected. The hash vouches for
+// what this driver was given to write, and whoever must be sure has to verify by
+// reading.
+//
+// Objects up to 8 MiB of known size are hashed in memory before the single PUT.
+// Larger and unknown-size objects are streamed and then copied server-side onto
+// themselves to add the metadata. That second copy needs read permission and
+// costs a second time. If it fails, Write returns the error although the new
+// content is already stored (without a hash).
+//
+// # Testing
+//
+// The in-process fake cannot store folder markers, so there is no always-on
+// conformance test: the conformance suite (TestConformanceMinIO) and the other
+// *Real tests need a real server. Run eval "$(testenv/minio/seed.sh)" and then
+// go test ./drivers/s3/ -run MinIO; see testenv/minio/README.md for the behaviour
+// observed there. Without the ODRAZ_TEST_S3_* variables those tests skip.
 package s3
 
 import (

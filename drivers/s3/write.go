@@ -133,9 +133,10 @@ func normMeta(m map[string]string) map[string]string {
 
 // abortUpload removes incomplete multipart uploads of key, best effort. The
 // client library aborts a failed upload with the caller's context, which fails
-// exactly when the failure was a cancelled context, and a multipart copy
-// never aborts, so unfinished parts would stay (and be billed). It removes
-// every incomplete upload of the key, also one of a concurrent writer.
+// exactly when the failure was a cancelled context, and a multipart copy (what
+// ComposeObject does for every non-empty object) never aborts, so unfinished
+// parts would stay (and be billed). It removes every incomplete upload of the
+// key, also one of a concurrent writer.
 func (f *fs) abortUpload(ctx context.Context, key string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
 	defer cancel()
@@ -283,7 +284,7 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 		minio.CopyDestOptions{Bucket: f.bucket, Object: key, UserMetadata: md, ReplaceMetadata: true},
 		minio.CopySrcOptions{Bucket: f.bucket, Object: key, MatchETag: strings.Trim(ui.ETag, `"`)})
 	if err != nil {
-		f.abortUpload(ctx, key) // a multipart copy (above 5 GiB) is never aborted by the library
+		f.abortUpload(ctx, key) // a multipart copy is never aborted by the library
 		return mapErr(err)
 	}
 	return nil
@@ -563,8 +564,9 @@ func (f *fs) transfer(ctx context.Context, from, to string, overwrite, move bool
 	return nil
 }
 
-// copyKey copies one object on the server, with its metadata. A folder
-// marker has no content to copy and is created again.
+// copyKey copies one object on the server, with its user metadata (the
+// Content-Type is not kept, see the package doc). A folder marker has no
+// content to copy and is created again.
 func (f *fs) copyKey(ctx context.Context, src, dst string) error {
 	if strings.HasSuffix(src, "/") {
 		_, err := f.mc.PutObject(ctx, f.bucket, dst, bytes.NewReader(nil), 0, minio.PutObjectOptions{})
@@ -574,7 +576,7 @@ func (f *fs) copyKey(ctx context.Context, src, dst string) error {
 		minio.CopyDestOptions{Bucket: f.bucket, Object: dst},
 		minio.CopySrcOptions{Bucket: f.bucket, Object: src})
 	if err != nil {
-		f.abortUpload(ctx, dst) // a multipart copy (above 5 GiB) is never aborted by the library
+		f.abortUpload(ctx, dst) // a multipart copy is never aborted by the library
 	}
 	return mapErr(err)
 }
