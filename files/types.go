@@ -96,8 +96,18 @@ type Client interface {
 	OpenDrive(ctx context.Context, driveID string) (FS, error)
 }
 
-// Optional interfaces, detected by type assertion on FS. Copier,
-// Previewer and Hasher are implemented by some adapters; EditorOpener is reserved.
+// Check compares what was written with what the store reports.
+type Check interface {
+	// Write takes the content, in order: exactly the bytes given to FS.Write.
+	io.Writer
+	// Verify returns nil if the file at path holds them, ErrChecksum if it
+	// does not and ErrUnsupported if the store cannot tell without the file
+	// being read.
+	Verify(ctx context.Context, path string) error
+}
+
+// Optional interfaces, detected by type assertion on FS. Copier, Previewer,
+// Hasher and ObjectStore are implemented by some adapters; EditorOpener is reserved.
 type (
 	// Copier is implemented by backends with a native copy (WebDAV COPY).
 	// Use the Copy helper, which validates arguments and falls back to
@@ -117,6 +127,19 @@ type (
 	// falls back to reading the file.
 	Hasher interface {
 		SHA256(ctx context.Context, path string) (string, error)
+	}
+	// ObjectStore is implemented by backends that keep objects in a store of its
+	// own kind (S3): they can confirm an upload from the server's own checksum
+	// and remove a file with its old versions.
+	ObjectStore interface {
+		// NewCheck returns a Check for content of size bytes (-1 if unknown)
+		// that Write stores.
+		NewCheck(size int64) Check
+		// Purge removes the file at path for good: every old version and delete
+		// marker a store that keeps them holds. On a folder it removes the
+		// folder's own marker and only if the folder holds nothing
+		// (ErrNotEmpty). Nothing there is not an error.
+		Purge(ctx context.Context, path string) error
 	}
 	// EditorOpener returns a URL to open the file in a web editor.
 	EditorOpener interface {

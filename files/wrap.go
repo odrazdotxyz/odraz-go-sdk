@@ -10,18 +10,27 @@ import (
 
 // Wrap returns an FS that normalizes every path with CleanPath before
 // calling inner, so adapters never see unclean or root-escaping paths.
-// Optional interfaces of inner (Copier, Previewer, Hasher) are preserved.
+// Optional interfaces of inner (Copier, Previewer, Hasher, ObjectStore) are preserved.
 //
 // Go cannot add methods conditionally, so each combination needs its own
-// type; they are built from independent one-method parts so adding another
-// optional interface means one part and its combinations, not new logic.
+// type; they are built from independent parts, one per optional interface, so
+// the combinations below hold no logic.
 func Wrap(inner FS) FS {
 	c := &cleanFS{inner}
 	cp, hasCp := inner.(Copier)
 	pv, hasPv := inner.(Previewer)
 	hs, hasHs := inner.(Hasher)
-	C, P, H := cleanCopy{cp}, cleanPreview{pv}, cleanHash{hs}
+	os, hasOs := inner.(ObjectStore)
+	C, P, H, O := cleanCopy{cp}, cleanPreview{pv}, cleanHash{hs}, cleanStore{os}
 	switch {
+	case hasCp && hasPv && hasHs && hasOs:
+		return &struct {
+			*cleanFS
+			cleanCopy
+			cleanPreview
+			cleanHash
+			cleanStore
+		}{c, C, P, H, O}
 	case hasCp && hasPv && hasHs:
 		return &struct {
 			*cleanFS
@@ -29,6 +38,27 @@ func Wrap(inner FS) FS {
 			cleanPreview
 			cleanHash
 		}{c, C, P, H}
+	case hasCp && hasPv && hasOs:
+		return &struct {
+			*cleanFS
+			cleanCopy
+			cleanPreview
+			cleanStore
+		}{c, C, P, O}
+	case hasCp && hasHs && hasOs:
+		return &struct {
+			*cleanFS
+			cleanCopy
+			cleanHash
+			cleanStore
+		}{c, C, H, O}
+	case hasPv && hasHs && hasOs:
+		return &struct {
+			*cleanFS
+			cleanPreview
+			cleanHash
+			cleanStore
+		}{c, P, H, O}
 	case hasCp && hasPv:
 		return &struct {
 			*cleanFS
@@ -41,12 +71,30 @@ func Wrap(inner FS) FS {
 			cleanCopy
 			cleanHash
 		}{c, C, H}
+	case hasCp && hasOs:
+		return &struct {
+			*cleanFS
+			cleanCopy
+			cleanStore
+		}{c, C, O}
 	case hasPv && hasHs:
 		return &struct {
 			*cleanFS
 			cleanPreview
 			cleanHash
 		}{c, P, H}
+	case hasPv && hasOs:
+		return &struct {
+			*cleanFS
+			cleanPreview
+			cleanStore
+		}{c, P, O}
+	case hasHs && hasOs:
+		return &struct {
+			*cleanFS
+			cleanHash
+			cleanStore
+		}{c, H, O}
 	case hasCp:
 		return &struct {
 			*cleanFS
@@ -62,8 +110,35 @@ func Wrap(inner FS) FS {
 			*cleanFS
 			cleanHash
 		}{c, H}
+	case hasOs:
+		return &struct {
+			*cleanFS
+			cleanStore
+		}{c, O}
 	}
 	return c
+}
+
+type cleanStore struct{ os ObjectStore }
+
+func (c cleanStore) NewCheck(size int64) Check { return cleanCheck{c.os.NewCheck(size)} }
+
+func (c cleanStore) Purge(ctx context.Context, p string) error {
+	p, err := CleanPath(p)
+	if err != nil {
+		return err
+	}
+	return c.os.Purge(ctx, p)
+}
+
+type cleanCheck struct{ Check }
+
+func (c cleanCheck) Verify(ctx context.Context, p string) error {
+	p, err := CleanPath(p)
+	if err != nil {
+		return err
+	}
+	return c.Check.Verify(ctx, p)
 }
 
 type cleanCopy struct{ cp Copier }
@@ -167,14 +242,32 @@ func (c *cleanFS) Capabilities() Capabilities { return c.in.Capabilities() }
 // ReadOnly returns an FS that serves reads from inner and rejects every
 // mutation with an error matching odraz.ErrPermission. Capabilities report
 // ReadOnly. Optional write interfaces (Copier) are not exposed; read-only
-// ones (Previewer) are kept.
+// ones (Previewer, and the checking half of ObjectStore) are kept.
 func ReadOnly(inner FS) FS {
 	ro := &readOnlyFS{inner}
-	if pv, ok := inner.(Previewer); ok {
+	pv, hasPv := inner.(Previewer)
+	os, hasOs := inner.(ObjectStore)
+	switch {
+	case hasPv && hasOs:
+		return &struct {
+			*readOnlyPreviewerFS
+			readOnlyStore
+		}{&readOnlyPreviewerFS{ro, pv}, readOnlyStore{os}}
+	case hasPv:
 		return &readOnlyPreviewerFS{ro, pv}
+	case hasOs:
+		return &struct {
+			*readOnlyFS
+			readOnlyStore
+		}{ro, readOnlyStore{os}}
 	}
 	return ro
 }
+
+type readOnlyStore struct{ os ObjectStore }
+
+func (r readOnlyStore) NewCheck(size int64) Check               { return r.os.NewCheck(size) }
+func (r readOnlyStore) Purge(_ context.Context, p string) error { return roErr("purge", p) }
 
 type readOnlyPreviewerFS struct {
 	*readOnlyFS

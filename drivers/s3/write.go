@@ -204,6 +204,8 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 
 	if single {
 		po.PartSize = singlePutLimit
+	} else if opts.Size >= 0 {
+		po.PartSize = uint64(PartSize(opts.Size)) // a Check relies on it
 	}
 	if cond {
 		po.SetMatchETagExcept("*")
