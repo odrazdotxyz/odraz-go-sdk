@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: {go-version-file: go.mod}
+        with: {go-version: '1.26.x', check-latest: true} # the latest patch: go.mod names the minimum
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - run: go vet ./...
@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: {go-version-file: go.mod}
+        with: {go-version: '1.26.x', check-latest: true} # the latest patch: go.mod names the minimum
       - name: conformance and real-server tests
         run: |
           vars=$(testenv/${{ matrix.server }}/seed.sh)
