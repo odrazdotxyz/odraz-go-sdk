@@ -1398,11 +1398,9 @@ func TestDocumentedBehaviourReal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := st.UserMetadata["Place"]
-	dec, err := new(mime.WordDecoder).DecodeHeader(got)
-	t.Logf("stored form of a non-ASCII value: %q", got)
-	if !strings.HasPrefix(strings.ToLower(got), "=?utf-8?") || err != nil || dec != "Köln 日本" {
-		t.Errorf("value = %q (decoded %q, %v)", got, dec, err)
+	// The client library decodes the encoded form the server returns.
+	if got := st.UserMetadata["Place"]; got != "Köln 日本" {
+		t.Errorf("value = %q", got)
 	}
 }
 

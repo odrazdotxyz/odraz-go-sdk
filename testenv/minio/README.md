@@ -20,6 +20,9 @@ go test -race -count=1 ./drivers/s3/                   # also runs the other *Re
 
 ## Behaviour observed (MinIO from the pinned image, minio-go 7.0.84, probed with a throwaway Go program on 2026-11-24)
 
+The library has since been upgraded to minio-go 7.4.1: these probes were not repeated. The tests were, and 7.4.1 still
+sends no custom header when completing a multipart upload (checked in its source).
+
 The probes used minio-go (`PutObject`, `core.*`, `StatObject`...) rather than curl, since SigV4 by hand is too heavy.
 Status and code are what the server returned.
 

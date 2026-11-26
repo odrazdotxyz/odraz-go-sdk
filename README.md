@@ -8,7 +8,7 @@ later other backends through the same types, without knowing the protocol undern
 go get github.com/odrazdotxyz/odraz-go-sdk
 ```
 
-Go 1.23+. Status: **v1 = accounts + files** with a generic WebDAV adapter, an OpenCloud adapter, a Nextcloud adapter and an S3 adapter (tested against MinIO only).
+Go 1.26+. Status: **v1 = accounts + files** with a generic WebDAV adapter, an OpenCloud adapter, a Nextcloud adapter and an S3 adapter (tested against MinIO only).
 
 ## Domains
 
@@ -108,7 +108,7 @@ Limits to know before you rely on it (details and provider notes in the
   shorter than `Size`, past the unknown-size limit, or returning an error.
 - **Metadata** keys `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Content-Language`,
   `Content-Type` and `Expires` set those headers; the rest is user metadata, and non-ASCII values are stored
-  RFC 2047-encoded. Control characters in a value are refused (`ErrInvalidPath`).
+  RFC 2047-encoded (some tools show them that way). Control characters in a value are refused (`ErrInvalidPath`).
 - **The stored SHA-256** (user metadata `odraz-sha256`) is set only by this adapter, and a rewrite of the same
   length by another tool is not detected.
 - **Checksums:** a hash is stored for files up to 8 MiB, and for larger ones when you pass

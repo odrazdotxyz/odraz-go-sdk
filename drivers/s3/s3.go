@@ -109,8 +109,9 @@
 // that is not a valid header name or starts with "x-minio-", a value with CR, LF
 // or another control character (tab is allowed) and an unreadable Expires fail
 // with ErrInvalidPath before anything is sent. Values that are not ASCII are
-// stored RFC 2047-encoded ("=?UTF-8?q?...?=", as seen on MinIO; mime.WordDecoder
-// decodes them). The files API cannot read metadata back.
+// stored RFC 2047-encoded ("=?UTF-8?q?...?="): the client library used here
+// decodes them when reading, other tools may show the encoded form
+// (mime.WordDecoder decodes it). The files API cannot read metadata back.
 //
 // Failed or cancelled uploads are aborted best effort (RemoveIncompleteUpload
 // with a context that is not cancelled), but a crash can leave incomplete
