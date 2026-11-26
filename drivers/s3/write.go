@@ -109,16 +109,30 @@ func (f *fs) conditionalPut(ctx context.Context) bool {
 		var rnd [8]byte
 		_, _ = crand.Read(rnd[:])
 		key := f.prefix + probeKey + hex.EncodeToString(rnd[:])
-		if _, err := f.mc.PutObject(ctx, f.bucket, key, bytes.NewReader([]byte{0}), 1, minio.PutObjectOptions{}); err != nil {
+		first, err := f.mc.PutObject(ctx, f.bucket, key, bytes.NewReader([]byte{0}), 1, minio.PutObjectOptions{})
+		if err != nil {
 			return
 		}
-		defer f.mc.RemoveObject(ctx, f.bucket, key, minio.RemoveObjectOptions{})
+		defer f.removeProbe(ctx, key, first.VersionID)
 		o := minio.PutObjectOptions{}
 		o.SetMatchETagExcept("*")
-		_, err := f.mc.PutObject(ctx, f.bucket, key, bytes.NewReader([]byte{0}), 1, o)
+		second, err := f.mc.PutObject(ctx, f.bucket, key, bytes.NewReader([]byte{0}), 1, o)
+		if err == nil && second.VersionID != first.VersionID { // the header was ignored
+			defer f.removeProbe(ctx, key, second.VersionID)
+		}
 		f.condPut = minio.ToErrorResponse(err).StatusCode == http.StatusPreconditionFailed
 	})
 	return f.condPut
+}
+
+// removeProbe deletes one object of the conditional-put check, best effort. It
+// names the version, so that a bucket which keeps versions (Backblaze B2) is
+// left with neither the old version nor a delete marker.
+func (f *fs) removeProbe(ctx context.Context, key, version string) {
+	err := f.mc.RemoveObject(ctx, f.bucket, key, minio.RemoveObjectOptions{VersionID: version})
+	if err != nil && version != "" { // a key that may not delete versions
+		_ = f.mc.RemoveObject(ctx, f.bucket, key, minio.RemoveObjectOptions{})
+	}
 }
 
 // abortUpload removes incomplete multipart uploads of key, best effort. The

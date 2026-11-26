@@ -101,3 +101,17 @@ func TestConformanceS3Versioned(t *testing.T) {
 	}
 	absent(t, fsys, "/v.txt")
 }
+
+// The throwaway object of the conditional-put check leaves nothing behind, not
+// even old versions or delete markers on a bucket that keeps them.
+func TestProbeLeavesNoVersionsReal(t *testing.T) {
+	fsys, mc, bucket := openReal(t)
+	ctx := context.Background()
+	prefix := drivePrefix(t, fsys, mc, bucket) // its small write runs the check
+	for o := range mc.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: strings.TrimSuffix(prefix, "/") + "/.odraz/", Recursive: true, WithVersions: true}) {
+		if o.Err != nil {
+			t.Skipf("cannot list versions: %v", o.Err)
+		}
+		t.Errorf("left behind: %s (version %q, delete marker %v)", o.Key, o.VersionID, o.IsDeleteMarker)
+	}
+}
