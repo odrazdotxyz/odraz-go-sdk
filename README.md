@@ -96,8 +96,8 @@ Limits to know before you rely on it (details and provider notes in the
 [package documentation](drivers/s3/s3.go)):
 
 - **Tested** against MinIO, SeaweedFS and Garage (conformance suite, also over TLS, and on a versioned bucket with
-  MinIO and SeaweedFS); CI runs all three. AWS S3, Backblaze B2, Wasabi and Cloudflare R2 are expected to work but
-  are **untested**. To check a provider, point the tests at a bucket of your own (see below).
+  MinIO and SeaweedFS); CI runs all three. **Backblaze B2** passes too (run by hand, not in CI). AWS S3, Wasabi and
+  Cloudflare R2 are expected to work but are **untested**. To check a provider, point the tests at a bucket of your own (see below).
 - **Folders** are zero-byte marker objects (`name/`) or just common key prefixes.
 - **`Move` is copy plus delete**, not atomic. `Copy` and `Move` keep the `Content-Type`, the other standard
   headers and the user metadata.

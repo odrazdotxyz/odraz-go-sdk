@@ -677,8 +677,8 @@ func TestWriteNoOverwriteRaceReal(t *testing.T) {
 	}
 }
 
-// skipUnlessConditionalPut skips where the server ignores If-None-Match: *
-// (Garage 1.0, for example): there only the check before the upload protects.
+// skipUnlessConditionalPut skips where the server ignores (Garage 1.0) or
+// refuses (Backblaze B2: 501) If-None-Match: *: there only the check before the upload protects.
 func skipUnlessConditionalPut(t *testing.T, mc *minio.Client, bucket string) {
 	t.Helper()
 	key := fmt.Sprintf("conditional-%d", rand.Int63())
@@ -691,8 +691,8 @@ func skipUnlessConditionalPut(t *testing.T, mc *minio.Client, bucket string) {
 	}
 	o := minio.PutObjectOptions{}
 	o.SetMatchETagExcept("*")
-	if put(o) == nil {
-		t.Skip("this server ignores If-None-Match: *")
+	if err := put(o); minio.ToErrorResponse(err).StatusCode != http.StatusPreconditionFailed {
+		t.Skipf("this server does not honour If-None-Match: * (%v)", err)
 	}
 }
 
@@ -1474,7 +1474,7 @@ func TestReplacingCopyKeepsForeignMetadataReal(t *testing.T) {
 		ContentType: "text/x-real", CacheControl: "no-store", Expires: expires,
 		UserMetadata: map[string]string{
 			"x-amz-meta-content-type": "meta-type", "x-amz-meta-cache-control": "meta-cache",
-			"Place": "Köln", "Odraz-Sha256": hexSHA(data) + fmt.Sprintf(":%d", len(data)),
+			"Place": mime.QEncoding.Encode("UTF-8", "Köln"), "Odraz-Sha256": hexSHA(data) + fmt.Sprintf(":%d", len(data)),
 		},
 	})
 	if err != nil {

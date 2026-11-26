@@ -80,14 +80,24 @@ func putOptions(p string, metadata map[string]string) (minio.PutObjectOptions, e
 			}
 			continue
 		default:
-			po.UserMetadata[k] = v
+			po.UserMetadata[k] = wireValue(v)
 			continue
+		}
+		if wireValue(v) != v {
+			return bad("the value of a standard header must be ASCII")
 		}
 		if v != "" { // an empty value keeps the default
 			*header = v
 		}
 	}
 	return po, nil
+}
+
+// wireValue returns a user metadata value as it is sent: RFC 2047-encoded
+// unless it is printable ASCII, because some servers (Backblaze B2) refuse a
+// request with other bytes in a header. The client library decodes it again.
+func wireValue(v string) string {
+	return mime.QEncoding.Encode("UTF-8", v)
 }
 
 // storedMetadata returns an object's headers and user metadata in the form a
@@ -103,7 +113,7 @@ func storedMetadata(st minio.ObjectInfo, oneRequest bool) map[string]string {
 	}
 	md := map[string]string{}
 	for k, v := range st.UserMetadata {
-		md[prefix+k] = v
+		md[prefix+k] = wireValue(v) // the client library decoded it
 	}
 	for _, h := range []string{"Cache-Control", "Content-Disposition", "Content-Encoding", "Content-Language"} {
 		if v := st.Metadata.Get(h); v != "" {

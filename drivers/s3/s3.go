@@ -42,11 +42,14 @@
 //	SeaweedFS       its S3 gateway; tested
 //	Garage          its S3 endpoint and region; tested
 //	AWS S3          no endpoint, the bucket's region; untested
-//	Backblaze B2    endpoint https://s3.<region>.backblazeb2.com; untested
+//	Backblaze B2    endpoint https://s3.<region>.backblazeb2.com; tested
 //	Wasabi          endpoint https://s3.<region>.wasabisys.com; untested
 //	Cloudflare R2   endpoint https://<account id>.r2.cloudflarestorage.com,
 //	                region auto; untested
 //	Ceph and others their S3 endpoint; untested
+//
+// Backblaze B2 (tested) keeps old versions, answers 501 to the conditional put
+// and refuses non-ASCII bytes in headers.
 //
 // Seen on the other servers the tests run against: SeaweedFS keeps real folders
 // (Delete removes children first); Garage 1.0 ignores If-None-Match: *, records
@@ -115,7 +118,8 @@
 // Keys starting with "x-amz-" (after removing "x-amz-meta-") are dropped. A name
 // that is not a valid header name or starts with "x-minio-", a value with CR, LF
 // or another control character (tab is allowed) and an unreadable Expires fail
-// with ErrInvalidPath before anything is sent. Values that are not ASCII are
+// with ErrInvalidPath before anything is sent, as does a standard header value
+// that is not ASCII. User metadata values that are not ASCII are sent and
 // stored RFC 2047-encoded ("=?UTF-8?q?...?="): the client library used here
 // decodes them when reading, other tools may show the encoded form
 // (mime.WordDecoder decodes it). The files API cannot read metadata back.
