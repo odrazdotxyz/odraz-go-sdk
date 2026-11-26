@@ -1,5 +1,5 @@
-// Command mkbucket waits for the test MinIO and creates the test bucket.
-// Used by testenv/minio/seed.sh; test only.
+// Command mkbucket waits for a test S3 server and creates the test bucket.
+// Used by testenv/minio and testenv/seaweedfs; test only.
 package main
 
 import (
@@ -36,6 +36,6 @@ func main() {
 		}
 		time.Sleep(time.Second)
 	}
-	fmt.Fprintln(os.Stderr, "minio did not become ready:", last)
+	fmt.Fprintln(os.Stderr, "the server did not become ready:", last)
 	os.Exit(1)
 }

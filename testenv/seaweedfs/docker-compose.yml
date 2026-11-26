@@ -1,0 +1,10 @@
+# SeaweedFS with its S3 gateway, for the S3 adapter tests. TEST ONLY: demo credentials.
+# S3 API on http://localhost:9301. State is on tmpfs: every `up` starts empty.
+services:
+  seaweedfs:
+    # Resolved from chrislusf/seaweedfs:latest (server version 4.54).
+    image: chrislusf/seaweedfs@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json", "-volume.max=20", "-master.volumeSizeLimitMB=256"]
+    ports: ["127.0.0.1:9301:8333"]
+    volumes: ["./s3.json:/etc/seaweedfs/s3.json:ro,Z"]
+    tmpfs: ["/data:size=1g"]

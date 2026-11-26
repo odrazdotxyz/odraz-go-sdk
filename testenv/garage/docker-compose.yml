@@ -1,0 +1,8 @@
+# Garage, for the S3 adapter tests. TEST ONLY: demo secrets.
+# S3 API on http://localhost:9302. State is on tmpfs: every `up` starts empty.
+services:
+  garage:
+    image: dxflrs/garage:v1.0.1
+    ports: ["127.0.0.1:9302:3900"]
+    volumes: ["./garage.toml:/etc/garage.toml:ro,Z"]
+    tmpfs: ["/var/lib/garage"]

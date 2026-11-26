@@ -90,32 +90,6 @@ func putOptions(p string, metadata map[string]string) (minio.PutObjectOptions, e
 	return po, nil
 }
 
-// replacementMetadata returns the headers and user metadata of an upload in the
-// form a copy that replaces metadata takes, so that the copy keeps them all.
-func replacementMetadata(po minio.PutObjectOptions) map[string]string {
-	md := make(map[string]string, len(po.UserMetadata)+7)
-	for k, v := range po.UserMetadata {
-		md[k] = v
-	}
-	// Without one the server would pick its own default.
-	md["Content-Type"] = "application/octet-stream"
-	for k, v := range map[string]string{
-		"Cache-Control":       po.CacheControl,
-		"Content-Disposition": po.ContentDisposition,
-		"Content-Encoding":    po.ContentEncoding,
-		"Content-Language":    po.ContentLanguage,
-		"Content-Type":        po.ContentType,
-	} {
-		if v != "" {
-			md[k] = v
-		}
-	}
-	if !po.Expires.IsZero() {
-		md["Expires"] = po.Expires.UTC().Format(http.TimeFormat)
-	}
-	return md
-}
-
 // storedMetadata returns an object's headers and user metadata in the form a
 // copy that replaces metadata takes.
 //

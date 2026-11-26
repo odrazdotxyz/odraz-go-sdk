@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ import (
 // fake, which trims trailing slashes and rejects zero-byte PUTs, so those
 // tests need this. Set ODRAZ_TEST_S3_ENDPOINT, ODRAZ_TEST_S3_BUCKET,
 // ODRAZ_TEST_S3_KEY and ODRAZ_TEST_S3_SECRET, optionally
+// ODRAZ_TEST_S3_REGION (most providers need it) and
 // ODRAZ_TEST_S3_TLS_INSECURE=1.
 func realS3(t *testing.T) (endpoint, bucket, key, secret string) {
 	t.Helper()
@@ -58,7 +60,12 @@ func openReal(t *testing.T) (files.FS, *minio.Client, string) {
 	ep, bucket, key, secret := realS3(t)
 	prefix := fmt.Sprintf("odraz-test-%d", rand.Int63())
 	cfg := map[string]string{"endpoint": ep, "bucket": bucket, "prefix": prefix}
-	if os.Getenv("ODRAZ_TEST_S3_TLS_INSECURE") == "1" {
+	region := os.Getenv("ODRAZ_TEST_S3_REGION")
+	if region != "" {
+		cfg["region"] = region
+	}
+	insecure := os.Getenv("ODRAZ_TEST_S3_TLS_INSECURE") == "1"
+	if insecure {
 		cfg[accounts.ConfigInsecure] = "true"
 	}
 	acc, store := account(t, key, secret, cfg)
@@ -76,7 +83,15 @@ func openReal(t *testing.T) (files.FS, *minio.Client, string) {
 		t.Fatal(err)
 	}
 	host := strings.TrimPrefix(strings.TrimPrefix(ep, "https://"), "http://")
+	var transport http.RoundTripper // the default one
+	if insecure {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // test server with a self-signed certificate
+		transport = tr
+	}
 	mc, err := minio.New(host, &minio.Options{
+		Region:       region,
+		Transport:    transport,
 		Creds:        credentials.NewStaticV4(key, secret, ""),
 		Secure:       strings.HasPrefix(ep, "https://"),
 		BucketLookup: minio.BucketLookupPath,
@@ -635,7 +650,8 @@ func TestConformanceS3(t *testing.T) {
 // Stat before the put cannot see a writer that is still uploading, so this
 // only holds where the server honours If-None-Match: *.
 func TestWriteNoOverwriteRaceReal(t *testing.T) {
-	fsys, _, _ := openReal(t)
+	fsys, mc, bucket := openReal(t)
+	skipUnlessConditionalPut(t, mc, bucket)
 	const n = 8
 	errs := make(chan error, n)
 	start := make(chan struct{})
@@ -658,6 +674,25 @@ func TestWriteNoOverwriteRaceReal(t *testing.T) {
 	}
 	if won != 1 {
 		t.Fatalf("%d writers succeeded, want 1", won)
+	}
+}
+
+// skipUnlessConditionalPut skips where the server ignores If-None-Match: *
+// (Garage 1.0, for example): there only the check before the upload protects.
+func skipUnlessConditionalPut(t *testing.T, mc *minio.Client, bucket string) {
+	t.Helper()
+	key := fmt.Sprintf("conditional-%d", rand.Int63())
+	put := func(o minio.PutObjectOptions) error {
+		_, err := mc.PutObject(context.Background(), bucket, key, strings.NewReader("x"), 1, o)
+		return err
+	}
+	if err := put(minio.PutObjectOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	o := minio.PutObjectOptions{}
+	o.SetMatchETagExcept("*")
+	if put(o) == nil {
+		t.Skip("this server ignores If-None-Match: *")
 	}
 }
 
@@ -1123,6 +1158,9 @@ func checkHeaders(t *testing.T, fsys files.FS, mc *minio.Client, bucket, prefix,
 	}
 	for k, want := range stdHeaders {
 		got := st.Metadata.Get(k)
+		// Over plain HTTP uploads are chunk-signed; Garage records that framing
+		// as an encoding in front of the caller's.
+		got = strings.TrimPrefix(got, "aws-chunked,")
 		if http.CanonicalHeaderKey(k) == "Expires" {
 			if !st.Expires.IsZero() {
 				got = st.Expires.UTC().Format(http.TimeFormat)
@@ -1430,11 +1468,13 @@ func TestReplacingCopyKeepsForeignMetadataReal(t *testing.T) {
 	ctx := context.Background()
 	prefix := drivePrefix(t, fsys, mc, bucket)
 	expires := time.Date(2037, 10, 21, 7, 28, 0, 0, time.UTC)
-	_, err := mc.PutObject(ctx, bucket, prefix+"/foreign", strings.NewReader("data"), 4, minio.PutObjectOptions{
+	// Over 5 MiB: some servers refuse a multipart copy of anything smaller.
+	data := patterned(6<<20, 9)
+	_, err := mc.PutObject(ctx, bucket, prefix+"/foreign", bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
 		ContentType: "text/x-real", CacheControl: "no-store", Expires: expires,
 		UserMetadata: map[string]string{
 			"x-amz-meta-content-type": "meta-type", "x-amz-meta-cache-control": "meta-cache",
-			"Place": "Köln", "Odraz-Sha256": hexSHA([]byte("data")) + ":4",
+			"Place": "Köln", "Odraz-Sha256": hexSHA(data) + fmt.Sprintf(":%d", len(data)),
 		},
 	})
 	if err != nil {
@@ -1456,7 +1496,7 @@ func TestReplacingCopyKeepsForeignMetadataReal(t *testing.T) {
 				st.UserMetadata["Content-Type"] != "meta-type" || st.UserMetadata["Cache-Control"] != "meta-cache" || place != "Köln" {
 				t.Errorf("limit %d: %q %v %v %q", limit, st.ContentType, st.Metadata, st.UserMetadata, place)
 			}
-			keeps(t, fsys, p, []byte("data"))
+			keeps(t, fsys, p, data)
 		}()
 	}
 }

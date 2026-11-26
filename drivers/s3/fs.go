@@ -29,6 +29,9 @@ type fs struct {
 
 	condOnce sync.Once
 	condPut  bool // the server honours If-None-Match: * (see conditionalPut)
+
+	verOnce sync.Once
+	phantom bool // listings may show folders that no longer exist (see keepsVersions)
 }
 
 func isNotFound(err error) bool {
@@ -52,7 +55,9 @@ func (f *fs) folder(ctx context.Context, p string) (bool, time.Time, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // stop the listing after the first object
 	marker := keyOf(f.prefix, p) + "/"
-	for o := range f.mc.ListObjects(ctx, f.bucket, minio.ListObjectsOptions{Prefix: marker, MaxKeys: 1}) {
+	// Recursive, so that only current objects count: a listing by folder can show
+	// one in a versioned bucket (MinIO does) that holds only deleted versions.
+	for o := range f.mc.ListObjects(ctx, f.bucket, minio.ListObjectsOptions{Prefix: marker, Recursive: true, MaxKeys: 1}) {
 		if o.Err != nil {
 			return false, time.Time{}, mapErr(o.Err)
 		}
@@ -62,6 +67,63 @@ func (f *fs) folder(ctx context.Context, p string) (bool, time.Time, error) {
 		return true, time.Time{}, nil
 	}
 	return false, time.Time{}, nil
+}
+
+// keepsVersions reports, found out once per drive, whether the bucket keeps old
+// versions, so that List has to confirm the folders it is shown. When that
+// cannot be asked (a restricted key) it assumes so; a server without
+// versioning (it answers 501) does not.
+func (f *fs) keepsVersions(ctx context.Context) bool {
+	f.verOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		v, err := f.mc.GetBucketVersioning(ctx, f.bucket)
+		switch {
+		case err == nil:
+			f.phantom = v.Status != ""
+		default:
+			f.phantom = minio.ToErrorResponse(err).StatusCode != http.StatusNotImplemented
+		}
+	})
+	return f.phantom
+}
+
+// dropEmpty removes from entries the folders that hold no current object.
+func (f *fs) dropEmpty(ctx context.Context, entries map[string]files.Entry) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		first error
+		slots = make(chan struct{}, copyWorkers)
+		gone  []string
+	)
+	for p, e := range entries {
+		if !e.IsDir {
+			continue
+		}
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			ok, _, err := f.folder(ctx, p)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err != nil && first == nil:
+				first = err
+				cancel()
+			case err == nil && !ok:
+				gone = append(gone, p)
+			}
+		}()
+	}
+	wg.Wait()
+	for _, p := range gone {
+		delete(entries, p)
+	}
+	return first
 }
 
 func (f *fs) Stat(ctx context.Context, p string) (files.Entry, error) {
@@ -126,6 +188,20 @@ func (f *fs) List(ctx context.Context, p string) ([]files.Entry, error) {
 			continue
 		}
 		byPath[cp] = fileEntry(cp, o)
+	}
+	if len(byPath) > 0 && f.keepsVersions(ctx) {
+		had := len(byPath)
+		if err := f.dropEmpty(ctx, byPath); err != nil {
+			return nil, err
+		}
+		if len(byPath) < had && len(byPath) == 0 && p != "/" {
+			// Only folders that are gone: is this one still there?
+			ok, _, err := f.folder(ctx, p)
+			if err != nil {
+				return nil, err
+			}
+			exists = ok
+		}
 	}
 	if !exists {
 		return nil, fmt.Errorf("s3: %s: %w", p, odraz.ErrNotFound)

@@ -12,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -413,6 +414,12 @@ func (f *fs) dirKey(p string) string {
 // removeKeys deletes keys in batches (RemoveObjects sends up to 1,000 per
 // request).
 func (f *fs) removeKeys(ctx context.Context, keys []string) error {
+	// Children before parents (reverse key order): a server with real folders,
+	// such as SeaweedFS, ignores the removal of a folder that still has
+	// children, and still reports success.
+	keys = slices.Clone(keys)
+	slices.Sort(keys)
+	slices.Reverse(keys)
 	ch := make(chan minio.ObjectInfo)
 	go func() {
 		defer close(ch)

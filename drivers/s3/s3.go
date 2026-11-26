@@ -38,13 +38,20 @@
 // expected to work but UNTESTED; check endpoints and regions in the provider's
 // documentation.
 //
-//	MinIO           endpoint http(s)://host:port, path-style (the default)
+//	MinIO           endpoint http(s)://host:port, path-style (the default); tested
+//	SeaweedFS       its S3 gateway; tested
+//	Garage          its S3 endpoint and region; tested
 //	AWS S3          no endpoint, the bucket's region; untested
 //	Backblaze B2    endpoint https://s3.<region>.backblazeb2.com; untested
 //	Wasabi          endpoint https://s3.<region>.wasabisys.com; untested
 //	Cloudflare R2   endpoint https://<account id>.r2.cloudflarestorage.com,
 //	                region auto; untested
 //	Ceph and others their S3 endpoint; untested
+//
+// Seen on the other servers the tests run against: SeaweedFS keeps real folders
+// (Delete removes children first); Garage 1.0 ignores If-None-Match: *, records
+// "aws-chunked" in Content-Encoding for uploads of up to 16 MiB over plain HTTP,
+// and refuses a multipart copy of a source under 5 MiB.
 //
 // Points to check on an untested provider: multipart uploads ask for CRC32C
 // checksums; objects above 5 GiB are copied in parts whose sizes can differ by
@@ -156,8 +163,7 @@
 //
 // # Testing
 //
-// The in-process fake cannot store folder markers, so there is no always-on
-// conformance test: the conformance suite (TestConformanceS3) and the other
+// The in-process fake cannot store folder markers, so the conformance suite (TestConformanceS3) and the other
 // *Real tests need a real server. Run eval "$(testenv/minio/seed.sh)" and then
 // go test ./drivers/s3/ -run Conformance; see testenv/minio/README.md for the behaviour
 // observed there. Without the ODRAZ_TEST_S3_* variables those tests skip.

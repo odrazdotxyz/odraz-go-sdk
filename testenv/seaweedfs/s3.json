@@ -1,0 +1,1 @@
+{"identities": [{"name": "test", "credentials": [{"accessKey": "odraz-test-only", "secretKey": "odraz-test-only-not-a-secret"}], "actions": ["Admin", "Read", "Write", "List", "Tagging"]}]}

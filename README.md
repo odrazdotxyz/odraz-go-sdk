@@ -95,9 +95,9 @@ rc, err := fs.Read(ctx, "/2026/photo.jpg", 0, -1)
 Limits to know before you rely on it (details and provider notes in the
 [package documentation](drivers/s3/s3.go)):
 
-- **Only MinIO has been tested.** AWS S3, Backblaze B2, Wasabi and Cloudflare R2 are expected to work but are
-  **untested** (as are Ceph and other S3 servers). The conformance suite runs only against a real MinIO
-  (`testenv/minio`); there is no always-on conformance test.
+- **Tested** against MinIO, SeaweedFS and Garage (conformance suite, also over TLS, and on a versioned bucket with
+  MinIO and SeaweedFS); CI runs all three. AWS S3, Backblaze B2, Wasabi and Cloudflare R2 are expected to work but
+  are **untested**. To check a provider, point the tests at a bucket of your own (see below).
 - **Folders** are zero-byte marker objects (`name/`) or just common key prefixes.
 - **`Move` is copy plus delete**, not atomic. `Copy` and `Move` keep the `Content-Type`, the other standard
   headers and the user metadata.
@@ -119,6 +119,15 @@ Limits to know before you rely on it (details and provider notes in the
 - **Auth proxies** are not detected (no `ErrBlockedByProxy`).
 - Give the bucket an **`AbortIncompleteMultipartUpload` lifecycle rule**: a crash can leave unfinished, billed
   uploads behind.
+
+To test against a provider, use a bucket made for it (the tests write and delete there, under random prefixes) and a
+key limited to that bucket, and keep the key out of the repository:
+
+```sh
+export ODRAZ_TEST_S3_ENDPOINT=https://s3.<region>.example.com ODRAZ_TEST_S3_REGION=<region>
+export ODRAZ_TEST_S3_BUCKET=<bucket> ODRAZ_TEST_S3_KEY=<key id> ODRAZ_TEST_S3_SECRET=<secret>
+go test -count=1 -v ./drivers/s3/
+```
 
 ### What `files.FS` gives you
 
