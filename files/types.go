@@ -61,6 +61,12 @@ type WriteOptions struct {
 	// Metadata is stored with the object (keys are case-insensitive).
 	// Backends without object metadata ignore it.
 	Metadata map[string]string
+	// SHA256, if set, is the expected SHA-256 of the content, in hex. A backend
+	// that supports it checks the data as it streams, stores nothing on a
+	// mismatch (ErrChecksum) and may keep the value, so that FS's Hasher returns
+	// it without reading. Only backends that implement Hasher verify it; others
+	// ignore it, so do not rely on it with those.
+	SHA256 string
 }
 
 // FS is a filesystem rooted at a drive. All paths are drive-relative and

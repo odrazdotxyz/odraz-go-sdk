@@ -5,7 +5,7 @@ MinIO (`cgr.dev/chainguard/minio`, pinned by digest in `docker-compose.yml`; tha
 
 ```sh
 eval "$(testenv/minio/seed.sh)"       # fresh server + bucket; exports ODRAZ_TEST_S3_{ENDPOINT,BUCKET,KEY,SECRET}
-go test -race -count=1 ./drivers/s3/ -run MinIO -v     # the conformance suite (fstest.Run)
+go test -race -count=1 ./drivers/s3/ -run Conformance -v   # the conformance suite (fstest.Run)
 go test -race -count=1 ./drivers/s3/                   # also runs the other *Real tests
 (cd testenv/minio && docker compose down -v)           # tear down
 ```

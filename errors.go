@@ -17,4 +17,7 @@ var (
 	// ErrInvalidPath is returned for malformed paths or paths that escape
 	// the drive root.
 	ErrInvalidPath = errors.New("invalid path")
+	// ErrChecksum means the data does not match the checksum the caller gave
+	// (or that checksum is malformed): nothing was stored.
+	ErrChecksum = errors.New("checksum mismatch")
 )

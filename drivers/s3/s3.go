@@ -50,8 +50,7 @@
 // checksums; objects above 5 GiB are copied in parts whose sizes can differ by
 // one byte, while some services (R2 documents this) want equal parts; and the
 // conditional put described below may be ignored. On a versioned bucket (B2
-// buckets keep versions) deleted and replaced objects stay as old versions, and
-// every upload that is copied a second time leaves two.
+// buckets keep versions) deleted and replaced objects stay as old versions.
 //
 // # Folders
 //
@@ -100,7 +99,7 @@
 // content is stored as the object, and with Overwrite the previous object stays
 // as it was (the parts of a multipart upload are aborted best effort, below).
 // Progress counts bytes read from the source; it can reach the total while the
-// upload and the second copy (below) are still running.
+// upload is still running.
 //
 // WriteOptions.Metadata becomes user metadata (x-amz-meta-*), except that the
 // keys Cache-Control, Content-Disposition, Content-Encoding, Content-Language,
@@ -146,18 +145,20 @@
 // what this driver was given to write, and whoever must be sure has to verify by
 // reading.
 //
-// Objects up to 8 MiB of known size are hashed in memory before the single PUT.
-// Larger and unknown-size objects are streamed and then copied server-side onto
-// themselves to add the metadata (and the headers once more). That second copy
-// needs read permission and costs a second time. If it fails, Write returns the error although the new
-// content is already stored (without a hash).
+// A hash is stored only when it costs nothing: objects up to 8 MiB of known size
+// are hashed in memory before the single PUT, and for a larger object of known
+// size the caller passes it as WriteOptions.SHA256. A supplied hash is checked
+// against the data as it streams, for any size: a mismatch fails with
+// ErrChecksum and, as above, stores and replaces nothing. Other uploads store no
+// hash (one of unknown size cannot, as the size is part of the value), and
+// SHA256 gives ErrUnsupported for them. Every object is uploaded once.
 //
 // # Testing
 //
 // The in-process fake cannot store folder markers, so there is no always-on
-// conformance test: the conformance suite (TestConformanceMinIO) and the other
+// conformance test: the conformance suite (TestConformanceS3) and the other
 // *Real tests need a real server. Run eval "$(testenv/minio/seed.sh)" and then
-// go test ./drivers/s3/ -run MinIO; see testenv/minio/README.md for the behaviour
+// go test ./drivers/s3/ -run Conformance; see testenv/minio/README.md for the behaviour
 // observed there. Without the ODRAZ_TEST_S3_* variables those tests skip.
 package s3
 

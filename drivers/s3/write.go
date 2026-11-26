@@ -158,12 +158,13 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 	if err != nil {
 		return err
 	}
+	want, err := expectedSum(p, opts.SHA256)
+	if err != nil {
+		return err
+	}
 	if err := f.requireParent(ctx, p); err != nil {
 		return err
 	}
-	// The metadata of the second copy (below), taken before the library gets
-	// po: it adds entries of its own to the map.
-	md := replacementMetadata(po)
 	key := keyOf(f.prefix, p)
 	single := opts.Size >= 0 && opts.Size <= singlePutLimit
 	cond := false
@@ -201,6 +202,18 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 		lim = newStrictReader(r, opts.Size,
 			fmt.Errorf("s3: %s: source is longer than the declared %d bytes: %w", p, opts.Size, odraz.ErrInvalidPath))
 	}
+	if want != "" {
+		// Hash below the strict reader: it asks before it lets the end through,
+		// so a mismatch leaves the upload incomplete.
+		src := &hashReader{r: lim.r, h: sha256.New()}
+		lim.r = src
+		lim.check = func() error {
+			if got := hex.EncodeToString(src.h.Sum(nil)); got != want {
+				return fmt.Errorf("s3: %s: content has SHA-256 %s, expected %s: %w", p, got, want, odraz.ErrChecksum)
+			}
+			return nil
+		}
+	}
 	hr := &hashReader{r: lim, h: sha256.New(), total: opts.Size, progress: opts.Progress}
 
 	if opts.Size >= 0 && opts.Size <= smallObject {
@@ -222,13 +235,15 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 		return mapErr(err)
 	}
 
-	// Large or unknown size: stream it, hashing on the way. The hash is only
-	// known at the end, and user metadata can only be set at the start of an
-	// upload, so it is added afterwards by copying the object onto itself.
-	// The copy is server-side but its cost grows with the object.
-	// lim never lets a source that fails or holds too much complete the
-	// upload, so nothing is replaced then.
-	ui, err := f.mc.PutObject(ctx, f.bucket, key, hr, opts.Size, po)
+	// Large or unknown size: stream it. User metadata can only be set when an
+	// upload starts, so a hash is stored only if the caller already knows it
+	// (and the size, which is part of the stored value); the stream is checked
+	// against it above. lim never lets a source that fails, holds too much or
+	// does not match complete the upload, so nothing is replaced then.
+	if want != "" && opts.Size >= 0 {
+		po.UserMetadata[shaMetaKey] = want + ":" + strconv.FormatInt(opts.Size, 10)
+	}
+	_, err = f.mc.PutObject(ctx, f.bucket, key, hr, opts.Size, po)
 	if serr := lim.failure(); serr != nil {
 		f.abortUpload(ctx, key)
 		return serr
@@ -237,13 +252,19 @@ func (f *fs) Write(ctx context.Context, p string, r io.Reader, opts files.WriteO
 		f.abortUpload(ctx, key)
 		return mapErr(err)
 	}
-	md[shaMetaKey] = hashValue(hr.h.Sum(nil), hr.n)
-	// Conditional on the ETag of the upload: it fails instead of touching an
-	// object that someone else replaced in between.
-	return f.serverCopy(ctx,
-		minio.CopyDestOptions{Bucket: f.bucket, Object: key, UserMetadata: md, ReplaceMetadata: true},
-		minio.CopySrcOptions{Bucket: f.bucket, Object: key, MatchETag: strings.Trim(ui.ETag, `"`)},
-		hr.n)
+	return nil
+}
+
+// expectedSum checks and lower-cases a caller-supplied SHA-256.
+func expectedSum(p, sum string) (string, error) {
+	if sum == "" {
+		return "", nil
+	}
+	sum = strings.ToLower(sum)
+	if b, err := hex.DecodeString(sum); err != nil || len(b) != sha256.Size {
+		return "", fmt.Errorf("s3: %s: the expected SHA-256 is not 64 hex digits: %w", p, odraz.ErrChecksum)
+	}
+	return sum, nil
 }
 
 // serverCopy copies the object src, of size bytes, to dst on the server. Above

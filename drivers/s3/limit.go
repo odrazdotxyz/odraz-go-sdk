@@ -22,6 +22,9 @@ type strictReader struct {
 	left    int64 // bytes still permitted
 	tooLong error
 	err     error // how the stream ended, once it has
+	// check, if set, is asked once the source has ended, before the end (and the
+	// held-back last byte) is passed on; an error from it fails the stream.
+	check func() error
 	// failed is err unless that is io.EOF. It is apart from mu so that asking
 	// never waits for a Read of a source that hangs.
 	failed atomic.Pointer[error]
@@ -48,6 +51,12 @@ func (s *strictReader) finish() {
 }
 
 func (s *strictReader) end(err error) error {
+	if err == io.EOF && s.check != nil {
+		if cerr := s.check(); cerr != nil {
+			err = cerr
+		}
+		s.check = nil
+	}
 	switch {
 	case err == io.EOF:
 	case errors.Is(err, io.ErrUnexpectedEOF):
@@ -109,7 +118,9 @@ func (s *strictReader) Read(b []byte) (int, error) {
 	if err != io.EOF {
 		return 0, s.end(err) // the byte of a failed source is not passed on
 	}
-	s.end(io.EOF)
+	if err := s.end(io.EOF); err != io.EOF {
+		return 0, err // the check refused it
+	}
 	if !ok {
 		return 0, io.EOF
 	}

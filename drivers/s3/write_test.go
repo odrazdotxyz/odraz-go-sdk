@@ -91,6 +91,9 @@ func openReal(t *testing.T) (files.FS, *minio.Client, string) {
 func writeBytes(t *testing.T, fsys files.FS, p string, data []byte, o files.WriteOptions) error {
 	t.Helper()
 	o.Size = int64(len(data))
+	if o.SHA256 == "" {
+		o.SHA256 = hexSHA(data) // so large uploads record it too
+	}
 	return fsys.Write(context.Background(), p, bytes.NewReader(data), o)
 }
 
@@ -556,8 +559,18 @@ func TestSHA256SmallAndMultipartReal(t *testing.T) {
 		data := make([]byte, tc.size)
 		rand.New(rand.NewSource(int64(tc.size))).Read(data)
 		p := "/" + tc.name
-		if err := fsys.Write(ctx, p, bytes.NewReader(data), files.WriteOptions{Size: tc.sz}); err != nil {
+		o := files.WriteOptions{Size: tc.sz}
+		if tc.sz >= 0 {
+			o.SHA256 = hexSHA(data)
+		}
+		if err := fsys.Write(ctx, p, bytes.NewReader(data), o); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if tc.sz < 0 { // the size is part of the stored value, so none is stored
+			if _, err := fsys.(files.Hasher).SHA256(ctx, p); !errors.Is(err, odraz.ErrUnsupported) {
+				t.Fatalf("%s: sha256 err = %v", tc.name, err)
+			}
+			continue
 		}
 		got, err := fsys.(files.Hasher).SHA256(ctx, p)
 		if err != nil || got != hexSHA(data) {
@@ -610,7 +623,7 @@ func TestListIsSorted(t *testing.T) {
 // the only conformance coverage of the adapter: the in-process fake cannot
 // store folder markers or zero-byte objects, and fstest.Run cannot be subset.
 // Run it with testenv/minio (see the package doc).
-func TestConformanceMinIO(t *testing.T) {
+func TestConformanceS3(t *testing.T) {
 	realS3(t)
 	fstest.Run(t, func(t *testing.T) files.FS {
 		fsys, _, _ := openReal(t)
@@ -736,17 +749,23 @@ func TestReservedMetadataKeyLargeReal(t *testing.T) {
 	data := make([]byte, 9<<20)
 	rand.New(rand.NewSource(1)).Read(data)
 	for i := 0; i < 5; i++ {
-		for _, size := range []int64{int64(len(data)), -1} {
+		for _, tc := range []struct {
+			size int64
+			sum  string
+		}{{int64(len(data)), ""}, {int64(len(data)), hexSHA(data)}, {-1, ""}} {
 			md := map[string]string{"keep": "me"}
 			for _, k := range reservedSpellings {
 				md[k] = strings.Repeat("0", 64) + ":9437184"
 			}
-			if err := fsys.Write(context.Background(), "/r.bin", bytes.NewReader(data), files.WriteOptions{Size: size, Overwrite: true, Metadata: md}); err != nil {
+			if err := fsys.Write(context.Background(), "/r.bin", bytes.NewReader(data), files.WriteOptions{Size: tc.size, SHA256: tc.sum, Overwrite: true, Metadata: md}); err != nil {
 				t.Fatal(err)
 			}
 			got, err := fsys.(files.Hasher).SHA256(context.Background(), "/r.bin")
-			if err != nil || got != hexSHA(data) {
-				t.Fatalf("size %d: sha256 = %q, %v", size, got, err)
+			if tc.sum == "" && !errors.Is(err, odraz.ErrUnsupported) {
+				t.Fatalf("size %d: caller metadata set the hash: %q, %v", tc.size, got, err)
+			}
+			if tc.sum != "" && (err != nil || got != tc.sum) {
+				t.Fatalf("size %d: sha256 = %q, %v", tc.size, got, err)
 			}
 		}
 	}
@@ -914,7 +933,9 @@ func TestOverCapOverwriteKeepsPreviousReal(t *testing.T) {
 		if err := fsys.Write(ctx, "/cap.bin", bytes.NewReader(data), files.WriteOptions{Size: -1, Overwrite: true}); err != nil {
 			t.Fatalf("%d: %v", size, err)
 		}
-		keeps(t, fsys, "/cap.bin", data)
+		if got := readAll(t, fsys, "/cap.bin"); !bytes.Equal(got, data) {
+			t.Fatalf("%d: stored %d bytes", size, len(got))
+		}
 	}
 }
 
@@ -1076,9 +1097,6 @@ func TestCopyErrorInSuccessResponseKeepsSource(t *testing.T) {
 	if string(keepsBytes) != "precious" {
 		t.Fatalf("source = %q", keepsBytes)
 	}
-	if err := fsys.Write(context.Background(), "/big", bytes.NewReader(make([]byte, 9<<20)), files.WriteOptions{Size: 9 << 20}); err == nil {
-		t.Error("write reported success although the self-copy failed")
-	}
 }
 
 var stdHeaders = map[string]string{
@@ -1091,7 +1109,7 @@ var stdHeaders = map[string]string{
 }
 
 // checkHeaders asserts the stored headers, user metadata and hash of key.
-func checkHeaders(t *testing.T, fsys files.FS, mc *minio.Client, bucket, prefix, p string, data []byte) {
+func checkHeaders(t *testing.T, fsys files.FS, mc *minio.Client, bucket, prefix, p string, data []byte, hashed bool) {
 	t.Helper()
 	ctx := context.Background()
 	e, err := fsys.Stat(ctx, p)
@@ -1120,8 +1138,12 @@ func checkHeaders(t *testing.T, fsys files.FS, mc *minio.Client, bucket, prefix,
 	if st.UserMetadata["Source"] != "camera" {
 		t.Errorf("%s: user metadata = %v", p, st.UserMetadata)
 	}
-	if got, err := fsys.(files.Hasher).SHA256(ctx, p); err != nil || got != hexSHA(data) {
+	got, err := fsys.(files.Hasher).SHA256(ctx, p)
+	if hashed && (err != nil || got != hexSHA(data)) {
 		t.Errorf("%s: sha256 = %q, %v", p, got, err)
+	}
+	if !hashed && !errors.Is(err, odraz.ErrUnsupported) {
+		t.Errorf("%s: unexpected stored hash %q, %v", p, got, err)
 	}
 }
 
@@ -1168,23 +1190,27 @@ func TestStandardHeaderMetadataReal(t *testing.T) {
 			size = -1
 		}
 		p := "/" + tc.name
-		if err := fsys.Write(ctx, p, bytes.NewReader(data), files.WriteOptions{Size: size, Metadata: headerMeta()}); err != nil {
+		o := files.WriteOptions{Size: size, Metadata: headerMeta()}
+		if !tc.unknown {
+			o.SHA256 = hexSHA(data)
+		}
+		if err := fsys.Write(ctx, p, bytes.NewReader(data), o); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		checkHeaders(t, fsys, mc, bucket, prefix, p, data)
+		checkHeaders(t, fsys, mc, bucket, prefix, p, data, !tc.unknown)
 		if err := fsys.(files.Copier).Copy(ctx, p, p+"-copy", false); err != nil {
 			t.Fatalf("%s copy: %v", tc.name, err)
 		}
-		checkHeaders(t, fsys, mc, bucket, prefix, p+"-copy", data)
+		checkHeaders(t, fsys, mc, bucket, prefix, p+"-copy", data, !tc.unknown)
 		if err := fsys.Move(ctx, p+"-copy", p+"-moved", false); err != nil {
 			t.Fatalf("%s move: %v", tc.name, err)
 		}
-		checkHeaders(t, fsys, mc, bucket, prefix, p+"-moved", data)
+		checkHeaders(t, fsys, mc, bucket, prefix, p+"-moved", data, !tc.unknown)
 	}
 }
 
 // Content-Type from the file name, with no metadata from the caller, survives
-// the large-upload self-copy, Copy, Move and a folder copy.
+// a large upload, Copy, Move and a folder copy.
 func TestCopyKeepsContentTypeReal(t *testing.T) {
 	fsys, _, _ := openReal(t)
 	ctx := context.Background()
@@ -1310,34 +1336,30 @@ func TestMultipartCopyKeepsHeadersReal(t *testing.T) {
 	if err := writeBytes(t, fsys, "/big", data, files.WriteOptions{Metadata: headerMeta()}); err != nil {
 		t.Fatal(err)
 	}
-	checkHeaders(t, fsys, mc, bucket, prefix, "/big", data)
+	checkHeaders(t, fsys, mc, bucket, prefix, "/big", data, true)
 	if err := fsys.(files.Copier).Copy(ctx, "/big", "/big-copy", false); err != nil {
 		t.Fatal(err)
 	}
-	checkHeaders(t, fsys, mc, bucket, prefix, "/big-copy", data)
+	checkHeaders(t, fsys, mc, bucket, prefix, "/big-copy", data, true)
 	st, err := mc.StatObject(ctx, bucket, prefix+"/big-copy", minio.StatObjectOptions{})
 	if err != nil || !strings.HasSuffix(st.ETag, "-1") {
 		t.Fatalf("not a multipart copy: etag %q, %v", st.ETag, err)
 	}
 }
 
-// Both copies of a large write: the second one is conditional on the ETag of
-// the first and replaces the metadata.
-func TestSelfCopyIsConditional(t *testing.T) {
+// A large upload is one upload: no second server-side copy, and a supplied hash
+// goes out with it.
+func TestLargeUploadMakesNoSecondCopy(t *testing.T) {
 	rec, ep := newRecorder(t)
 	fsys, _ := openFSAt(t, ep, "")
 	if err := writeBytes(t, fsys, "/big", make([]byte, 9<<20), files.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	copies := rec.matching(func(r *http.Request) bool { return r.Header.Get("X-Amz-Copy-Source") != "" })
-	if len(copies) != 1 {
-		t.Fatalf("%d copy requests", len(copies))
+	if n := len(rec.matching(func(r *http.Request) bool { return r.Header.Get("X-Amz-Copy-Source") != "" })); n != 0 {
+		t.Fatalf("%d copy requests", n)
 	}
-	h := copies[0].Header
-	if h.Get("X-Amz-Copy-Source-If-Match") == "" || h.Get("X-Amz-Metadata-Directive") != "REPLACE" ||
-		h.Get("Content-Type") != "application/octet-stream" || h.Get("X-Amz-Meta-Odraz-Sha256") == "" ||
-		h.Get("X-Amz-Meta-X-Amz-Checksum-Algorithm") != "" || h.Get("X-Amz-Checksum-Algorithm") != "" {
-		t.Fatalf("headers = %v", h)
+	if n := len(rec.matching(func(r *http.Request) bool { return r.Header.Get("X-Amz-Meta-Odraz-Sha256") != "" })); n != 1 {
+		t.Fatalf("%d requests carry the hash", n)
 	}
 }
 

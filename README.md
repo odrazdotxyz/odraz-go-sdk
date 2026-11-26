@@ -111,9 +111,9 @@ Limits to know before you rely on it (details and provider notes in the
   RFC 2047-encoded. Control characters in a value are refused (`ErrInvalidPath`).
 - **The stored SHA-256** (user metadata `odraz-sha256`) is set only by this adapter, and a rewrite of the same
   length by another tool is not detected.
-- **Uploads above 8 MiB and of unknown size** are copied server-side a second time to attach the hash: they need
-  read permission and cost twice. If that copy fails, `Write` returns an error although the content is stored.
-  Unknown-size uploads are limited to about 78 GiB.
+- **Checksums:** a hash is stored for files up to 8 MiB, and for larger ones when you pass
+  `WriteOptions.SHA256`; the data is then checked while it streams (`ErrChecksum` on a mismatch, nothing stored).
+  Uploads of unknown size store none, and are limited to about 78 GiB. Every file is uploaded once.
 - **Reads** from an offset above 0 at or past the end of a file fail, as does a positive length on an empty
   file; reading a whole empty file works.
 - **Auth proxies** are not detected (no `ErrBlockedByProxy`).
@@ -137,6 +137,8 @@ backend supports it, otherwise read+write), `ReadOnly`.
 - Optional features are optional interfaces, found by type assertion: `files.Copier`, `Previewer` and `Hasher`
   today, `EditorOpener` reserved.
 - `WriteOptions.Metadata` sets object metadata on write; backends without object metadata ignore it.
+`WriteOptions.SHA256` (hex) asks a backend that implements `Hasher` to check the content while it streams and to
+fail with `ErrChecksum`, storing nothing, if it differs; other backends ignore it.
 
 ## Capabilities
 
