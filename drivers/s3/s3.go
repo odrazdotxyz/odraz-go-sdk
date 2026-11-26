@@ -142,6 +142,15 @@
 // first, because MinIO loses Expires in a plain copy: such an object, like one
 // above 5 GiB, is copied with its headers and metadata set again.
 //
+// # Verify and purge
+//
+// files.ObjectStore: NewCheck computes the ETag the server gives an object this
+// driver uploads (MD5, or for a multipart upload the MD5 of the parts' MD5s; the
+// part size is PartSize) and Verify compares it after one metadata request. An
+// object encrypted with SSE-KMS or a customer key has no comparable ETag
+// (ErrUnsupported), and a server-side copy can have another one. Purge removes
+// every version and delete marker of one key, or of an empty folder's marker.
+//
 // # SHA-256
 //
 // Write records the whole object's hash as the user metadata "odraz-sha256" with
