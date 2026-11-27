@@ -258,6 +258,12 @@ type previewFS struct {
 	api *dav.Client // the server root, not the user's files
 }
 
+// DeleteIfMatch implements files.ConditionalDeleter: Nextcloud refuses (412) a
+// DELETE whose If-Match is not the file's ETag (probed, see testenv/nextcloud).
+func (f *previewFS) DeleteIfMatch(ctx context.Context, p, etag string) error {
+	return f.DeleteMatching(ctx, p, etag)
+}
+
 func (f *previewFS) Preview(ctx context.Context, p string, width, height int) (io.ReadCloser, string, error) {
 	rs, err := f.C.Propfind(ctx, p, 0)
 	if err != nil {

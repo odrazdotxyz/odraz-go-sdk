@@ -107,7 +107,8 @@ type Check interface {
 }
 
 // Optional interfaces, detected by type assertion on FS. Copier, Previewer,
-// Hasher and ObjectStore are implemented by some adapters; EditorOpener is reserved.
+// Hasher, ObjectStore and ConditionalDeleter are implemented by some adapters;
+// EditorOpener is reserved.
 type (
 	// Copier is implemented by backends with a native copy (WebDAV COPY).
 	// Use the Copy helper, which validates arguments and falls back to
@@ -140,6 +141,16 @@ type (
 		// folder's own marker and only if the folder holds nothing
 		// (ErrNotEmpty). Nothing there is not an error.
 		Purge(ctx context.Context, path string) error
+	}
+	// ConditionalDeleter removes a file only if it is still the one the caller
+	// read. An FS made by Wrap or ReadOnly always has the method and returns
+	// ErrUnsupported when the backend cannot promise that (some servers ignore
+	// the condition and delete anyway, so those do not offer it).
+	ConditionalDeleter interface {
+		// DeleteIfMatch removes the file at path if its ETag (Entry.ETag) is
+		// etag, and otherwise keeps it (ErrChanged). A folder, or an empty
+		// etag, is ErrInvalidPath.
+		DeleteIfMatch(ctx context.Context, path, etag string) error
 	}
 	// EditorOpener returns a URL to open the file in a web editor.
 	EditorOpener interface {

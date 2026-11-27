@@ -20,4 +20,7 @@ var (
 	// ErrChecksum means the data does not match the checksum the caller gave
 	// (or that checksum is malformed): nothing was stored.
 	ErrChecksum = errors.New("checksum mismatch")
+	// ErrChanged means a file is no longer the one the caller named by its
+	// ETag: it was left as it is.
+	ErrChanged = errors.New("changed since it was read")
 )

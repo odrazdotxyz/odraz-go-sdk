@@ -52,3 +52,7 @@ eval "$(testenv/opencloud/seed.sh)"   # fresh instance + app token; exports ODRA
      -> `302` to the redirect URI with `code` and `state`
 | Thumbnails | WebDAV `GET <file>?preview=1&x=64&y=64&a=1&scalingup=0` returns a PNG (9.9 KB for a 677 KB image, 64x64 crop); `404` for a type it cannot render (`.md` and `.bin` had none, `.txt` did); folders 404 |
 | Avatar | `GET /graph/v1.0/me/photo/$value` is `404` `failed to get photo` for a user without a photo (the demo users); `/graph/v1.0/me` has `displayName` |
+
+## DELETE with If-Match (probed 2026-11-27)
+
+OpenCloud 9.2.0 **ignores** `If-Match`: a stale or made-up ETag still deletes the file (204). The adapter does not offer a conditional delete.

@@ -181,6 +181,8 @@ Other behaviour worth knowing (the S3 adapter's own limits are listed above):
   and the adapters fetch them (OpenCloud: WebDAV GET with `?preview=1`; Nextcloud: `core/preview` by file id). A
   backend or file type without one gives `ErrUnsupported`; fall back to reading the original. Which types get one is
   the server's decision (both render images and text files; video needs ffmpeg on Nextcloud). Plain WebDAV and S3 have none. The size is a hint: servers keep the aspect ratio and may round up to a cached size.
+- **Delete if unchanged** (`files.ConditionalDeleter`): `DeleteIfMatch(path, etag)` removes a file only if it is still
+  the one you read (`ErrChanged` otherwise). Only Nextcloud offers it today; other drives answer `ErrUnsupported`.
 - **Object stores** (`files.ObjectStore`, S3): `NewCheck(size)` takes the bytes you write and `Verify` compares them
   with the checksum the server reports, without reading the file back (`ErrUnsupported` where it cannot, for example
   with SSE-KMS); `Purge` removes a file with all its old versions.

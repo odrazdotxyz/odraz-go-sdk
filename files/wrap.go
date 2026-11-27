@@ -237,6 +237,23 @@ func (c *cleanFS) Delete(ctx context.Context, p string, rec bool) error {
 	return c.in.Delete(ctx, p, rec)
 }
 
+// DeleteIfMatch is on every wrapped FS, answering ErrUnsupported for a backend
+// without it, so that it needs no type of its own for each combination.
+func (c *cleanFS) DeleteIfMatch(ctx context.Context, p, etag string) error {
+	p, err := CleanPath(p)
+	if err != nil {
+		return err
+	}
+	if p == "/" || etag == "" {
+		return fmt.Errorf("files: delete %s if unchanged: a file and its ETag are needed: %w", p, odraz.ErrInvalidPath)
+	}
+	d, ok := c.in.(ConditionalDeleter)
+	if !ok {
+		return fmt.Errorf("files: %s: this drive cannot delete only if unchanged: %w", p, odraz.ErrUnsupported)
+	}
+	return d.DeleteIfMatch(ctx, p, etag)
+}
+
 func (c *cleanFS) Capabilities() Capabilities { return c.in.Capabilities() }
 
 // ReadOnly returns an FS that serves reads from inner and rejects every
@@ -291,7 +308,8 @@ func (r *readOnlyFS) Mkdir(_ context.Context, p string) error { return roErr("mk
 func (r *readOnlyFS) Move(_ context.Context, from, _ string, _ bool) error {
 	return roErr("move", from)
 }
-func (r *readOnlyFS) Delete(_ context.Context, p string, _ bool) error { return roErr("delete", p) }
+func (r *readOnlyFS) Delete(_ context.Context, p string, _ bool) error   { return roErr("delete", p) }
+func (r *readOnlyFS) DeleteIfMatch(_ context.Context, p, _ string) error { return roErr("delete", p) }
 func (r *readOnlyFS) Capabilities() Capabilities {
 	c := r.FS.Capabilities()
 	c.ReadOnly, c.AtomicMove, c.ServerSideCopy = true, false, false

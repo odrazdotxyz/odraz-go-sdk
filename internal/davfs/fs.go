@@ -336,6 +336,32 @@ func (f *FS) Delete(ctx context.Context, p string, recursive bool) error {
 	return nil
 }
 
+// DeleteMatching removes the file at p only if its ETag is etag (If-Match on
+// DELETE, ErrChanged otherwise). It is not named DeleteIfMatch on purpose: not
+// every WebDAV server honours the header (OpenCloud ignores it and deletes), so
+// only an adapter for one that was seen to may offer files.ConditionalDeleter.
+func (f *FS) DeleteMatching(ctx context.Context, p, etag string) error {
+	cur, err := f.Stat(ctx, p)
+	if err != nil {
+		return err
+	}
+	if cur.IsDir || etag == "" {
+		return fmt.Errorf("webdav: %s: only a file can be deleted if unchanged: %w", p, odraz.ErrInvalidPath)
+	}
+	if !strings.HasPrefix(etag, `"`) && !strings.HasPrefix(etag, "W/") {
+		etag = `"` + etag + `"`
+	}
+	resp, err := f.C.Do(ctx, dav.Request{Method: "DELETE", Path: p, Header: http.Header{"If-Match": {etag}}})
+	if dav.Status(err) == http.StatusPreconditionFailed {
+		return fmt.Errorf("webdav: %s: %w", p, odraz.ErrChanged)
+	}
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
 var _ files.Copier = (*FS)(nil)
 
 // Copy uses the WebDAV COPY method (server side).
