@@ -44,7 +44,8 @@ func (f *fs) purgeKey(ctx context.Context, key string) (int, error) {
 	listing, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var ids []string
-	// The prefix also matches longer keys, which sort after key itself.
+	// The prefix also matches longer keys. The whole listing is read: not every
+	// server is bound to list the key itself first.
 	for o := range f.mc.ListObjects(listing, f.bucket, minio.ListObjectsOptions{Prefix: key, Recursive: true, WithVersions: true}) {
 		if o.Err != nil {
 			if minio.ToErrorResponse(o.Err).StatusCode == http.StatusNotImplemented {
@@ -54,8 +55,6 @@ func (f *fs) purgeKey(ctx context.Context, key string) (int, error) {
 		}
 		if o.Key == key {
 			ids = append(ids, o.VersionID)
-		} else if o.Key > key {
-			break
 		}
 	}
 	if err := ctx.Err(); err != nil {

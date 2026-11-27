@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -204,5 +206,40 @@ func TestPurgeRefusedDeleteIsAnError(t *testing.T) {
 	}
 	if err := purge(t, fsys, "/locked"); !errors.Is(err, odraz.ErrPermission) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Nothing says every server lists versions in key order: a longer key listed
+// first must not hide the versions of the key being purged.
+func TestPurgeUnsortedListing(t *testing.T) {
+	version := func(key, id string) string {
+		return "<Version><Key>" + key + "</Key><VersionId>" + id + "</VersionId><IsLatest>false</IsLatest><LastModified>2026-01-01T00:00:00Z</LastModified><Size>1</Size></Version>"
+	}
+	var mu sync.Mutex
+	var removed []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case r.URL.Query().Has("location"):
+			fmt.Fprint(w, `<LocationConstraint></LocationConstraint>`)
+		case r.URL.Query().Has("versions"):
+			fmt.Fprint(w, `<ListVersionsResult><Name>test</Name><Prefix>key</Prefix><IsTruncated>false</IsTruncated>`+
+				version("keyz", "z1")+version("key", "v1")+version("keyz", "z2")+version("key", "v2")+`</ListVersionsResult>`)
+		case r.Method == http.MethodDelete:
+			mu.Lock()
+			removed = append(removed, strings.TrimPrefix(r.URL.Path, "/test/")+"@"+r.URL.Query().Get("versionId"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	fsys, _ := openFSAt(t, srv.URL, "")
+	if err := purge(t, fsys, "/key"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(removed, []string{"key@v1", "key@v2"}) {
+		t.Fatalf("removed %v", removed)
 	}
 }
